@@ -1,0 +1,55 @@
+# Default configuration - deliberately conservative.
+# Paper trading is the default; live trading requires explicit multi-step opt-in
+# (see README "Safety & going live").
+
+mode: paper  # paper | backtest | live
+
+polling:
+  odds_poll_interval_sec: 2.0
+  polymarket_poll_interval_sec: 1.0
+  max_quote_age_sec: 3.0        # Layer 6 staleness filter
+
+sports:
+  - basketball_nba
+  - americanfootball_nfl
+  - soccer_epl
+  - baseball_mlb
+
+matching:
+  min_match_score: 0.82        # rapidfuzz similarity threshold for team/market matching
+  max_date_skew_hours: 6
+
+strategy:
+  arbitrage:
+    enabled: true
+    min_edge_pct: 0.5           # keep gaps LOW -> more frequent, lower-risk hits
+    max_edge_pct: 8.0           # above this, treat as a data error and skip
+  value_edge:
+    enabled: false              # secondary, higher-variance layer - opt in explicitly
+    min_books_agreeing: 3
+    min_edge_pct: 3.0
+    kelly_fraction: 0.15
+
+filters:
+  min_polymarket_liquidity_usd: 500
+  max_spread_pct: 3.0
+  max_signal_latency_ms: 800
+  max_concurrent_positions_per_market_group: 1  # correlation guard
+
+risk:
+  bankroll_usd: 1000
+  max_stake_per_trade_pct: 2.0
+  max_stake_per_trade_usd: 50
+  max_total_exposure_pct: 25
+  max_daily_loss_pct: 5
+  max_consecutive_losses: 5
+  fee_buffer_pct: 1.0           # subtracted from edge to account for Polymarket taker fee + book vig slack
+
+execution:
+  paper_slippage_bps: 15
+  order_timeout_sec: 5
+  max_retries: 2
+
+monitoring:
+  log_level: INFO
+  metrics_window_size: 200
