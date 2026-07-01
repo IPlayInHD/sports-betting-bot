@@ -10,11 +10,11 @@ the same gap.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
 from arbbot.execution.base import ExecutionClient
+from arbbot.execution.concurrent_submit import submit_orders_concurrently
 from arbbot.models import GapSignal, Order, OrderStatus, Position, Side, SignalType, Venue
 
 logger = logging.getLogger(__name__)
@@ -77,27 +77,14 @@ class OrderManager:
                 )
         return orders
 
-    async def _submit_with_retry(self, client: ExecutionClient, order: Order) -> Order:
-        attempt = 0
-        while True:
-            try:
-                return await asyncio.wait_for(client.submit(order), timeout=self._timeout)
-            except Exception as exc:  # broad by design: this is the external-API boundary
-                attempt += 1
-                if attempt > self._max_retries:
-                    logger.error("order %s failed after %d attempts: %s", order.order_id, attempt, exc)
-                    order.status = OrderStatus.REJECTED
-                    return order
-                logger.warning("order %s attempt %d failed, retrying: %s", order.order_id, attempt, exc)
+    def _client_for_order(self, order: Order) -> ExecutionClient:
+        return self._polymarket_client if order.venue == Venue.POLYMARKET else self._sportsbook_client
 
     async def execute_signal(self, signal: GapSignal, total_stake_usd: float) -> Position:
         orders = self._build_orders(signal, total_stake_usd)
         start = time.perf_counter()
 
-        clients = [
-            self._polymarket_client if o.venue == Venue.POLYMARKET else self._sportsbook_client for o in orders
-        ]
-        results = await asyncio.gather(*(self._submit_with_retry(c, o) for c, o in zip(clients, orders)))
+        results = await submit_orders_concurrently(orders, self._client_for_order, self._timeout, self._max_retries)
 
         latency_ms = (time.perf_counter() - start) * 1000.0
         logger.info("signal %s executed in %.1fms across %d leg(s)", signal.signal_id, latency_ms, len(results))

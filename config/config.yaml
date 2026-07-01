@@ -53,3 +53,16 @@ execution:
 monitoring:
   log_level: INFO
   metrics_window_size: 200
+
+markets:
+  crypto:
+    enabled: true
+    exchanges: [coinbase, kraken, binanceus]   # use "binance" instead of "binanceus" outside the US
+    symbols: [BTC/USD, ETH/USD, SOL/USD]
+    poll_interval_sec: 2.0
+    min_edge_pct: 0.3          # keep gaps LOW here too -> frequency over size
+    max_edge_pct: 5.0          # above this, treat as a bad quote and skip
+    fee_pct_per_leg: 0.1       # typical taker fee; raise this to match your actual exchange tier
+    max_stake_per_trade_pct: 2.0
+    max_stake_per_trade_usd: 50
+    max_concurrent_positions_per_symbol: 1

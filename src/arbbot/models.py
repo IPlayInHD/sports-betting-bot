@@ -23,6 +23,19 @@ class Venue(str, Enum):
     POLYMARKET = "polymarket"
 
 
+class MarketFamily(str, Enum):
+    """Which asset class / strategy family a trade belongs to. Sports keeps
+    its own richer GapSignal/MatchedMarket shape; every other family
+    produces the more generic MarketOpportunity below.
+    """
+
+    SPORTS = "sports"
+    CRYPTO = "crypto"
+    FOREX = "forex"
+    EQUITIES = "equities"
+    DERIVATIVES = "derivatives"
+
+
 class OrderStatus(str, Enum):
     PENDING = "pending"
     SUBMITTED = "submitted"
@@ -108,6 +121,46 @@ class GapSignal:
     sportsbook_stake_fraction: float = 0.0
     polymarket_stake_fraction: float = 0.0
     polymarket_side: Side = Side.NO
+    created_at: float = field(default_factory=now_ts)
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def age_sec(self) -> float:
+        return now_ts() - self.created_at
+
+
+@dataclass(slots=True)
+class CryptoQuote:
+    """Best bid/ask for one symbol on one exchange."""
+
+    exchange: str
+    symbol: str            # normalized form, e.g. "BTC/USD"
+    bid: float
+    ask: float
+    observed_at: float = field(default_factory=now_ts)
+
+    @property
+    def mid(self) -> float:
+        return (self.bid + self.ask) / 2.0
+
+
+@dataclass(slots=True)
+class MarketOpportunity:
+    """Generalized signal shape for non-sports asset classes (crypto, forex,
+    equities, derivatives). Each leg is a plain dict:
+    {"venue": str, "action": "buy"|"sell", "symbol": str, "price": float,
+    "stake_fraction": float}. Kept intentionally looser than GapSignal since
+    these strategies' leg shapes vary more (2-venue buy/sell, N-pair
+    triangular, single-instrument basis, etc.) than sports' consistent
+    "outcome vs outcome" structure.
+    """
+
+    opportunity_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    family: MarketFamily = MarketFamily.CRYPTO
+    symbol: str = ""
+    edge_pct: float = 0.0
+    confidence: float = 1.0
+    legs: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=now_ts)
     metadata: dict = field(default_factory=dict)
 

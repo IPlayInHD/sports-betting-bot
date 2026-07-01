@@ -26,6 +26,9 @@ dependencies = [
 live = [
     "py-clob-client>=0.19.0",
 ]
+live-crypto = [
+    "ccxt>=4.3",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

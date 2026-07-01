@@ -86,24 +86,31 @@ class ExposureTracker:
     def __init__(self) -> None:
         self._open_by_group: dict[str, int] = {}
 
-    def market_group_key(self, signal: GapSignal) -> str:
+    @staticmethod
+    def market_group_key(signal: GapSignal) -> str:
         return signal.metadata.get("event_id", signal.matched_market.match_id)
 
-    def check(self, signal: GapSignal, cfg: FilterConfig) -> FilterResult:
-        key = self.market_group_key(signal)
+    def check_key(self, key: str, max_concurrent: int) -> FilterResult:
         current = self._open_by_group.get(key, 0)
-        if current >= cfg.max_concurrent_positions_per_market_group:
+        if current >= max_concurrent:
             return FilterResult(False, f"exposure cap reached for market group {key} ({current} open)")
         return FilterResult(True)
 
-    def on_open(self, signal: GapSignal) -> None:
-        key = self.market_group_key(signal)
+    def check(self, signal: GapSignal, cfg: FilterConfig) -> FilterResult:
+        return self.check_key(self.market_group_key(signal), cfg.max_concurrent_positions_per_market_group)
+
+    def on_open_key(self, key: str) -> None:
         self._open_by_group[key] = self._open_by_group.get(key, 0) + 1
 
-    def on_close(self, signal: GapSignal) -> None:
-        key = self.market_group_key(signal)
+    def on_close_key(self, key: str) -> None:
         if key in self._open_by_group:
             self._open_by_group[key] = max(0, self._open_by_group[key] - 1)
+
+    def on_open(self, signal: GapSignal) -> None:
+        self.on_open_key(self.market_group_key(signal))
+
+    def on_close(self, signal: GapSignal) -> None:
+        self.on_close_key(self.market_group_key(signal))
 
 
 def run_filter_pipeline(

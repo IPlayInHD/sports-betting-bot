@@ -88,6 +88,24 @@ def summary() -> dict:
     for r in rows:
         by_signal_type[r["signal_type"]] = by_signal_type.get(r["signal_type"], 0) + 1
 
+    by_family: dict[str, dict] = {}
+    for r in rows:
+        family = r["market_family"] or "sports"
+        bucket = by_family.setdefault(
+            family, {"trades": 0, "stake_usd": 0.0, "locked_in_profit_usd": 0.0, "wins": 0, "settled": 0}
+        )
+        bucket["trades"] += 1
+        bucket["stake_usd"] += r["stake_usd"] or 0.0
+        if r["locked_in_profit_usd"] is not None:
+            bucket["settled"] += 1
+            bucket["locked_in_profit_usd"] += r["locked_in_profit_usd"]
+            if r["locked_in_profit_usd"] > 0:
+                bucket["wins"] += 1
+    for bucket in by_family.values():
+        bucket["stake_usd"] = round(bucket["stake_usd"], 2)
+        bucket["locked_in_profit_usd"] = round(bucket["locked_in_profit_usd"], 2)
+        bucket["win_rate"] = round(bucket["wins"] / bucket["settled"], 4) if bucket["settled"] else None
+
     return {
         "total_trades": total_trades,
         "settled_trades": len(settled),
@@ -98,6 +116,7 @@ def summary() -> dict:
         "p50_latency_ms": round(_percentile(50), 1),
         "p95_latency_ms": round(_percentile(95), 1),
         "by_signal_type": by_signal_type,
+        "by_market_family": by_family,
     }
 
 

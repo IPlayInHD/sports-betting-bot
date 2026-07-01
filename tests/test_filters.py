@@ -73,3 +73,27 @@ def test_exposure_tracker_caps_concurrent_positions(matched_market_factory):
 
     tracker.on_close(signal)
     assert run_filter_pipeline([signal2], cfg, tracker) == [signal2]
+
+
+def test_exposure_tracker_key_based_api_used_by_non_sports_markets():
+    tracker = ExposureTracker()
+    key = "crypto:BTC/USD"
+
+    assert tracker.check_key(key, max_concurrent=1).passed is True
+    tracker.on_open_key(key)
+    assert tracker.check_key(key, max_concurrent=1).passed is False
+
+    tracker.on_close_key(key)
+    assert tracker.check_key(key, max_concurrent=1).passed is True
+
+
+def test_exposure_tracker_key_and_signal_apis_share_state(matched_market_factory):
+    tracker = ExposureTracker()
+    signal = _make_signal(matched_market_factory)
+    key = tracker.market_group_key(signal)
+
+    tracker.on_open(signal)
+    assert tracker.check_key(key, max_concurrent=1).passed is False
+
+    tracker.on_close_key(key)
+    assert tracker.check(signal, FilterConfig(max_concurrent_positions_per_market_group=1)).passed is True

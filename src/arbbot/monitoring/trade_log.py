@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS trades (
     locked_in_profit_usd REAL,
     latency_ms REAL,
     sportsbook_fraction REAL,
-    polymarket_fraction REAL
+    polymarket_fraction REAL,
+    market_family TEXT NOT NULL DEFAULT 'sports'
 );
 
 CREATE TABLE IF NOT EXISTS status (
@@ -51,6 +52,13 @@ def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    # Migration for db files created before market_family existed:
+    # CREATE TABLE IF NOT EXISTS won't retroactively add a new column.
+    try:
+        conn.execute("ALTER TABLE trades ADD COLUMN market_family TEXT NOT NULL DEFAULT 'sports'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return conn
 
 
@@ -101,13 +109,14 @@ def record_trade(
     latency_ms: float,
     sportsbook_fraction: float,
     polymarket_fraction: float,
+    market_family: str = "sports",
 ) -> None:
     conn.execute(
         """
         INSERT OR REPLACE INTO trades (
             signal_id, ts, mode, signal_type, event_id, edge_pct, confidence, stake_usd,
-            locked_in_profit_usd, latency_ms, sportsbook_fraction, polymarket_fraction
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            locked_in_profit_usd, latency_ms, sportsbook_fraction, polymarket_fraction, market_family
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             signal_id,
@@ -122,6 +131,7 @@ def record_trade(
             latency_ms,
             sportsbook_fraction,
             polymarket_fraction,
+            market_family,
         ),
     )
     conn.commit()

@@ -13,7 +13,7 @@ different risk profiles:
 
 from __future__ import annotations
 
-from arbbot.models import GapSignal, SignalType
+from arbbot.models import GapSignal, MarketOpportunity, SignalType
 
 
 def kelly_fraction(win_prob: float, decimal_payout: float) -> float:
@@ -73,6 +73,24 @@ def size_value_edge_signal(
     stake_fraction = min(fractional, pct_cap)
     stake_usd = stake_fraction * bankroll_usd
     return max(0.0, min(stake_usd, max_stake_per_trade_usd))
+
+
+def size_crypto_opportunity(
+    opportunity: MarketOpportunity,
+    bankroll_usd: float,
+    max_stake_per_trade_pct: float,
+    max_stake_per_trade_usd: float,
+) -> float:
+    """Same "near-riskless -> use the full risk-managed cap, scaled by
+    confidence" approach as sports arbitrage. Unlike Polymarket, the public
+    ticker endpoints don't expose order book depth, so there's no liquidity
+    cap here -- rely on the per-trade dollar cap to keep size conservative
+    (real usage should assume real order book depth is unknown and keep this
+    cap small).
+    """
+    pct_cap = bankroll_usd * (max_stake_per_trade_pct / 100.0)
+    base_cap = min(pct_cap, max_stake_per_trade_usd)
+    return base_cap * max(0.25, opportunity.confidence)
 
 
 def size_signal(

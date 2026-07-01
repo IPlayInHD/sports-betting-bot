@@ -70,6 +70,25 @@ class MonitoringConfig(BaseModel):
     metrics_window_size: int = 200
 
 
+class CryptoMarketConfig(BaseModel):
+    enabled: bool = True
+    # ccxt/exchange ids. Default assumes a US-based user (binanceus, not
+    # binance.com, which blocks US IPs); switch to "binance" if that's not you.
+    exchanges: list[str] = Field(default_factory=lambda: ["coinbase", "kraken", "binanceus"])
+    symbols: list[str] = Field(default_factory=lambda: ["BTC/USD", "ETH/USD", "SOL/USD"])
+    poll_interval_sec: float = 2.0
+    min_edge_pct: float = 0.3
+    max_edge_pct: float = 5.0
+    fee_pct_per_leg: float = 0.1
+    max_stake_per_trade_pct: float = 2.0
+    max_stake_per_trade_usd: float = 50.0
+    max_concurrent_positions_per_symbol: int = 1
+
+
+class MarketsConfig(BaseModel):
+    crypto: CryptoMarketConfig = CryptoMarketConfig()
+
+
 class AppConfig(BaseModel):
     mode: Literal["paper", "backtest", "live"] = "paper"
     sports: list[str] = Field(default_factory=list)
@@ -80,6 +99,7 @@ class AppConfig(BaseModel):
     risk: RiskConfig = RiskConfig()
     execution: ExecutionConfig = ExecutionConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
+    markets: MarketsConfig = MarketsConfig()
 
 
 class Secrets(BaseSettings):
@@ -108,6 +128,16 @@ def load_config(path: str | Path = "config/config.yaml") -> AppConfig:
 
 def load_secrets() -> Secrets:
     return Secrets()
+
+
+def get_crypto_exchange_credentials(exchange_id: str) -> tuple[str | None, str | None]:
+    """Per-exchange API credentials for live crypto trading, e.g.
+    CRYPTO_COINBASE_API_KEY / CRYPTO_COINBASE_API_SECRET. Plain env lookups
+    (not a fixed pydantic field) since the exchange list is user-configurable
+    rather than a fixed set.
+    """
+    prefix = f"CRYPTO_{exchange_id.upper()}"
+    return os.getenv(f"{prefix}_API_KEY"), os.getenv(f"{prefix}_API_SECRET")
 
 
 def is_live_trading_authorized(cfg: AppConfig, secrets: Secrets) -> bool:

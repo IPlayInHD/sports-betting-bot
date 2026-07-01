@@ -1,8 +1,13 @@
 # arbbot
 
-A multi-layer bot that detects pricing gaps between traditional sportsbook
-odds markets and Polymarket, and (optionally) trades on them. It defaults to
-**paper trading** and treats live trading as an explicit, multi-step opt-in.
+A multi-layer bot that detects pricing gaps across multiple markets and
+(optionally) trades on them:
+- **Sports**: sportsbook odds vs. Polymarket (riskless cross-market arbitrage)
+- **Crypto**: cross-exchange price gaps for the same coin (Coinbase/Kraken/Binance)
+
+It defaults to **paper trading** and treats live trading as an explicit,
+multi-step opt-in. Forex, stocks/ETFs, and futures/options arbitrage are
+planned but not yet implemented -- see "Roadmap" at the bottom.
 
 ## Read this first
 
@@ -27,6 +32,16 @@ odds markets and Polymarket, and (optionally) trades on them. It defaults to
   stale data, or venues resolving a market differently than expected. Start
   in paper mode, then backtest, then (if at all) go live with a small
   bankroll.
+- **Crypto arbitrage assumes pre-funded balances on every exchange you
+  trade.** Moving crypto between exchanges takes minutes and costs network
+  fees -- far too slow to capture a gap that exists right now. The bot buys
+  on the cheap exchange and sells on the expensive one simultaneously,
+  assuming you already hold cash/coin on both; it does not transfer funds
+  between exchanges. You'll need to periodically rebalance manually (or with
+  your own tooling) as inventory drifts toward whichever side is cheaper.
+- **Exchange bot policies**: check each crypto exchange's API terms before
+  running this live -- policies on automated trading vary by exchange and
+  account tier.
 
 ## Architecture: 10 layers
 
@@ -76,19 +91,37 @@ riskless.
   on it fast, instead of silently submitting bets that would violate most
   books' terms. If you trade through a betting exchange with a real,
   ToS-compliant order API, implement an `ExecutionClient` for it.
+- **Crypto legs**: both automatable once live trading is authorized, via the
+  `ccxt` library (`markets/crypto/execution.py`) -- one instance per
+  exchange, using your own per-exchange API key/secret.
+
+## Crypto cross-exchange arbitrage
+
+`markets/crypto/` runs alongside the sports pipeline as an independent
+polling loop (`config.yaml`'s `markets.crypto` section). For each symbol
+(BTC/USD, ETH/USD, ...), it checks every configured exchange's public
+ticker, and if the highest bid on one exchange covers the lowest ask on
+another plus both legs' taker fees, that's a genuine buy-low/sell-high gap
+-- read `markets/crypto/exchanges.py` and `detector.py`'s docstrings for the
+exact mechanics and the pre-funded-balance caveat above. Like sports
+arbitrage, `min_edge_pct` defaults low (0.3%) to favor frequency over size.
+Public price feeds (Coinbase, Kraken, Binance/Binance.US) need no API key;
+live order placement needs one key/secret pair per exchange
+(`CRYPTO_<EXCHANGE>_API_KEY`/`_SECRET` in `.env`).
 
 ## Setup
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"        # add "[live]" too if/when you set up live Polymarket trading
+pip install -e ".[dev]"        # add "[live]" for live Polymarket, "[live-crypto]" for live crypto exchanges
 cp .env.example .env           # fill in only what you need (see below)
 ```
 
 - `ODDS_API_KEY` (from https://the-odds-api.com) — optional. Without it, the
   bot uses a built-in synthetic odds generator (`ARBBOT_USE_MOCK_DATA=true`
-  is implied automatically when the key is absent).
-- Polymarket market data (Gamma + CLOB reads) needs **no key**.
+  is implied automatically when the key is absent, and also switches crypto
+  to its synthetic feed).
+- Polymarket and crypto exchange market data (public tickers) need **no key**.
 - Everything else in `.env.example` is only required for live trading.
 
 ## Running
@@ -112,10 +145,11 @@ python scripts/run_dashboard.py
 ```
 It's read-only and cannot place trades — it just reads the same local
 `data/trades.db` file the bot writes to and shows a live-updating view of
-win rate, locked-in profit, latency, and recent trades. It also displays a
-prominent banner confirming whether the bot is in **paper (simulation)** or
-**live** mode, and turns amber if the risk manager has halted trading. No
-data is sent anywhere; both processes only talk to `localhost`.
+win rate, locked-in profit, latency, recent trades, and a breakdown by
+market (sports vs. crypto). It also displays a prominent banner confirming
+whether the bot is in **paper (simulation)** or **live** mode, and turns
+amber if the risk manager has halted trading. No data is sent anywhere;
+both processes only talk to `localhost`.
 
 **Tests:**
 ```bash
@@ -138,5 +172,26 @@ Live trading requires **both**:
 Either one alone is not enough — this dual opt-in exists so a single
 misconfigured file or env var can't silently start moving real money
 (`config.py::is_live_trading_authorized`). Even then, only the Polymarket
-leg is automated; see "Execution model" above. Before enabling this, re-read
-"Read this first."
+and crypto legs are automated (not sportsbook bets); see "Execution model"
+above. Before enabling this, re-read "Read this first."
+
+## Roadmap
+
+Sports and crypto arbitrage are implemented and tested. Not yet built:
+
+- **Forex** (triangular arbitrage): needs a broker API with live bid/ask
+  (e.g. an OANDA demo account, which is free); real edge on major pairs is
+  usually captured by HFT firms in milliseconds, so expect this to be mostly
+  educational rather than profitable.
+- **Stocks/ETFs** (ETF premium/discount vs. NAV): needs a funded,
+  API-enabled brokerage account (Alpaca, Interactive Brokers) before any of
+  this is even testable, and genuine retail-capturable equity arbitrage is
+  rare since US equities share the same NBBO.
+- **Futures & options** (cash-and-carry, put-call parity): needs a funded
+  futures/options account and usually paid market data -- the most
+  setup-heavy of the group.
+
+Each would follow the same `markets/<name>/` pattern as crypto: a
+data-feed abstraction with a mock + real adapter, a detector producing
+`MarketOpportunity` records, and an execution client gated behind the same
+paper-by-default / dual-opt-in-for-live safety model.

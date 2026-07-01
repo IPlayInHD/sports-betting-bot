@@ -87,6 +87,12 @@
   .badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
   .badge.arbitrage { background: rgba(38,166,154,0.15); color: var(--green); }
   .badge.value_edge { background: rgba(240,185,11,0.15); color: var(--amber); }
+  .badge.crypto_arbitrage { background: rgba(38,166,154,0.15); color: var(--green); }
+  .badge.family-sports { background: rgba(139,147,167,0.18); color: #cdd3e0; }
+  .badge.family-crypto { background: rgba(240,185,11,0.15); color: var(--amber); }
+  .badge.family-forex { background: rgba(100,149,237,0.18); color: #8fb3ff; }
+  .badge.family-equities { background: rgba(186,104,200,0.18); color: #d9a6e6; }
+  .badge.family-derivatives { background: rgba(239,83,80,0.15); color: var(--red); }
   .pnl.pos { color: var(--green); }
   .pnl.neg { color: var(--red); }
   .empty { color: var(--muted); padding: 20px; text-align: center; }
@@ -108,6 +114,11 @@
     <div class="panel">
       <h2>Cumulative Locked-In Profit</h2>
       <canvas id="pnlChart"></canvas>
+    </div>
+
+    <div class="panel">
+      <h2>By Market</h2>
+      <div id="byMarketWrap"></div>
     </div>
 
     <div class="panel">
@@ -226,6 +237,7 @@ function renderTrades(trades) {
   const rows = trades.map(t => `
     <tr>
       <td>${fmtTime(t.ts)}</td>
+      <td><span class="badge family-${t.market_family}">${t.market_family ?? 'sports'}</span></td>
       <td><span class="badge ${t.signal_type}">${t.signal_type}</span></td>
       <td>${t.event_id ?? ''}</td>
       <td class="num">${t.edge_pct.toFixed(2)}%</td>
@@ -237,8 +249,32 @@ function renderTrades(trades) {
   wrap.innerHTML = `
     <table>
       <thead><tr>
-        <th>Time</th><th>Type</th><th>Event</th><th>Edge</th><th>Confidence</th><th>Stake</th><th>Locked-In P&amp;L</th>
+        <th>Time</th><th>Market</th><th>Type</th><th>Event</th><th>Edge</th><th>Confidence</th><th>Stake</th><th>Locked-In P&amp;L</th>
       </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function renderByMarket(summary) {
+  const wrap = document.getElementById('byMarketWrap');
+  const families = Object.entries(summary.by_market_family || {});
+  if (!families.length) {
+    wrap.innerHTML = '<div class="empty">No trades yet.</div>';
+    return;
+  }
+  const rows = families.map(([family, s]) => `
+    <tr>
+      <td><span class="badge family-${family}">${family}</span></td>
+      <td class="num">${s.trades}</td>
+      <td class="num">${fmtUsd(s.stake_usd)}</td>
+      <td class="num pnl ${s.locked_in_profit_usd >= 0 ? 'pos' : 'neg'}">${fmtUsd(s.locked_in_profit_usd)}</td>
+      <td class="num">${fmtPct(s.win_rate)}</td>
+    </tr>
+  `).join('');
+  wrap.innerHTML = `
+    <table>
+      <thead><tr><th>Market</th><th>Trades</th><th>Stake</th><th>Locked-In P&amp;L</th><th>Win Rate</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   `;
@@ -264,6 +300,7 @@ async function refresh() {
   try { renderBanner(status); } catch (e) { console.error('renderBanner failed', e); }
   try { renderCards(summary, status); } catch (e) { console.error('renderCards failed', e); }
   try { renderChart(series); } catch (e) { console.error('renderChart failed', e); }
+  try { renderByMarket(summary); } catch (e) { console.error('renderByMarket failed', e); }
   try { renderTrades(trades); } catch (e) { console.error('renderTrades failed', e); }
 
   document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
