@@ -37,7 +37,7 @@ filters:
   max_concurrent_positions_per_market_group: 1  # correlation guard
 
 risk:
-  bankroll_usd: 1000
+  bankroll_usd: 50
   max_stake_per_trade_pct: 2.0
   max_stake_per_trade_usd: 50
   max_total_exposure_pct: 25
