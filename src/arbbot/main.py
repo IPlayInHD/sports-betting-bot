@@ -30,6 +30,7 @@ from arbbot.execution.paper import PaperExecutionClient
 from arbbot.logging_setup import log_event, setup_logging
 from arbbot.matching.market_matcher import match_markets
 from arbbot.models import GapSignal, SportsbookQuote
+from arbbot.monitoring import trade_log
 from arbbot.monitoring.alerts import AlertDispatcher
 from arbbot.monitoring.metrics import MetricsTracker
 from arbbot.odds.base import OddsProvider
@@ -58,6 +59,7 @@ async def _run_cycle(
     order_manager: OrderManager,
     metrics: MetricsTracker,
     filter_cfg: FilterConfig,
+    db_conn,
 ) -> None:
     odds_results = await asyncio.gather(
         *(odds_provider.fetch_quotes(sport) for sport in cfg.sports), return_exceptions=True
@@ -128,8 +130,24 @@ async def _run_cycle(
         position = await order_manager.execute_signal(signal, stake_usd)
         exposure_tracker.on_open(signal)
         risk_manager.on_position_opened(stake_usd)
-        if position.orders:
-            metrics.record_latency((position.orders[0].submitted_at - signal.created_at) * 1000.0)
+
+        latency_ms = (position.orders[0].submitted_at - signal.created_at) * 1000.0 if position.orders else 0.0
+        metrics.record_latency(latency_ms)
+
+        trade_log.record_trade(
+            db_conn,
+            signal_id=signal.signal_id,
+            mode=cfg.mode,
+            signal_type=signal.signal_type.value,
+            event_id=signal.metadata.get("event_id", signal.matched_market.match_id),
+            edge_pct=signal.edge_pct,
+            confidence=signal.confidence,
+            stake_usd=stake_usd,
+            locked_in_profit_usd=position.guaranteed_profit_usd,
+            latency_ms=latency_ms,
+            sportsbook_fraction=signal.sportsbook_stake_fraction,
+            polymarket_fraction=signal.polymarket_stake_fraction,
+        )
 
         log_event(
             logger,
@@ -140,6 +158,7 @@ async def _run_cycle(
             edge_pct=round(signal.edge_pct, 3),
             confidence=signal.confidence,
             stake_usd=round(stake_usd, 2),
+            locked_in_profit_usd=position.guaranteed_profit_usd,
         )
 
 
@@ -182,8 +201,10 @@ def _build_execution_clients(
 async def run(cfg: AppConfig, secrets: Secrets) -> None:
     setup_logging(cfg.monitoring.log_level)
 
-    odds_provider, poly_client, _ = _build_data_sources(cfg, secrets)
+    odds_provider, poly_client, use_mock = _build_data_sources(cfg, secrets)
     alert_dispatcher = AlertDispatcher(webhook_url=secrets.alert_webhook_url)
+    db_conn = trade_log.get_connection()
+    trade_log.record_startup(db_conn, mode=cfg.mode, use_mock=use_mock, bankroll_usd=cfg.risk.bankroll_usd)
     exposure_tracker = ExposureTracker()
     metrics = MetricsTracker(window_size=cfg.monitoring.metrics_window_size)
     risk_manager = RiskManager(
@@ -219,10 +240,24 @@ async def run(cfg: AppConfig, secrets: Secrets) -> None:
             cycle_start = time.perf_counter()
             try:
                 await _run_cycle(
-                    cfg, odds_provider, poly_client, exposure_tracker, risk_manager, order_manager, metrics, filter_cfg
+                    cfg,
+                    odds_provider,
+                    poly_client,
+                    exposure_tracker,
+                    risk_manager,
+                    order_manager,
+                    metrics,
+                    filter_cfg,
+                    db_conn,
                 )
             except Exception:  # noqa: BLE001 - keep the polling loop alive across transient errors
                 logger.exception("unhandled error in polling cycle")
+            trade_log.record_heartbeat(
+                db_conn,
+                trading_halted=risk_manager.state.trading_halted,
+                halt_reason=risk_manager.state.halt_reason,
+                open_exposure_usd=risk_manager.state.open_exposure_usd,
+            )
             if metrics.total_trades and metrics.total_trades % 10 == 0:
                 log_event(logger, logging.INFO, "metrics snapshot", **metrics.summary())
             elapsed = time.perf_counter() - cycle_start
@@ -230,6 +265,7 @@ async def run(cfg: AppConfig, secrets: Secrets) -> None:
     finally:
         await odds_provider.close()
         await poly_client.close()
+        db_conn.close()
 
 
 def parse_args() -> argparse.Namespace:

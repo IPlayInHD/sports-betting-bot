@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>arbbot dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="/static/vendor/chart.umd.js"></script>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --border: #232838;
+    --text: #e6e9f0;
+    --muted: #8b93a7;
+    --green: #26a69a;
+    --red: #ef5350;
+    --amber: #f0b90b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header h1 {
+    font-size: 18px;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  header h1 span { color: var(--muted); font-weight: 400; }
+
+  .banner {
+    padding: 10px 24px;
+    font-weight: 600;
+    font-size: 14px;
+    text-align: center;
+    letter-spacing: 0.02em;
+  }
+  .banner.paper { background: rgba(38, 166, 154, 0.15); color: var(--green); border-bottom: 1px solid rgba(38,166,154,0.3); }
+  .banner.live { background: rgba(239, 83, 80, 0.18); color: var(--red); border-bottom: 1px solid rgba(239,83,80,0.4); }
+  .banner.offline { background: rgba(139, 147, 167, 0.12); color: var(--muted); border-bottom: 1px solid var(--border); }
+  .banner.halted { background: rgba(240, 185, 11, 0.15); color: var(--amber); border-bottom: 1px solid rgba(240,185,11,0.35); }
+
+  main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .card .value { font-size: 24px; font-weight: 700; }
+  .card .value.pos { color: var(--green); }
+  .card .value.neg { color: var(--red); }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 24px;
+  }
+  .panel h2 { font-size: 14px; margin: 0 0 12px 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge.arbitrage { background: rgba(38,166,154,0.15); color: var(--green); }
+  .badge.value_edge { background: rgba(240,185,11,0.15); color: var(--amber); }
+  .pnl.pos { color: var(--green); }
+  .pnl.neg { color: var(--red); }
+  .empty { color: var(--muted); padding: 20px; text-align: center; }
+
+  canvas { max-height: 260px; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
+</style>
+</head>
+<body>
+  <div id="banner" class="banner offline">Checking bot status…</div>
+  <header>
+    <h1>arbbot <span>performance dashboard</span></h1>
+    <div id="lastUpdated" style="color: var(--muted); font-size: 12px;"></div>
+  </header>
+
+  <main>
+    <div class="cards" id="cards"></div>
+
+    <div class="panel">
+      <h2>Cumulative Locked-In Profit</h2>
+      <canvas id="pnlChart"></canvas>
+    </div>
+
+    <div class="panel">
+      <h2>Recent Trades</h2>
+      <div id="tradesTableWrap"></div>
+    </div>
+  </main>
+
+  <footer>Read-only view. Never places trades. Data refreshes every 3 seconds from the bot's local trade log.</footer>
+
+<script>
+const REFRESH_MS = 3000;
+let chart = null;
+
+function fmtUsd(n) {
+  if (n === null || n === undefined) return '—';
+  const sign = n < 0 ? '-' : '';
+  return sign + '$' + Math.abs(n).toFixed(2);
+}
+function fmtPct(n) {
+  if (n === null || n === undefined) return '—';
+  return (n * 100).toFixed(1) + '%';
+}
+function fmtTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString();
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  return res.json();
+}
+
+function renderBanner(status) {
+  const el = document.getElementById('banner');
+  if (!status.running) {
+    el.className = 'banner offline';
+    el.textContent = 'BOT NOT RUNNING — start it with "python scripts/run_paper.py" to see live data';
+    return;
+  }
+  if (status.trading_halted) {
+    el.className = 'banner halted';
+    el.textContent = `TRADING HALTED — ${status.halt_reason}`;
+    return;
+  }
+  if (status.mode === 'live') {
+    el.className = 'banner live';
+    el.textContent = 'LIVE TRADING — REAL MONEY IS AT RISK';
+  } else {
+    el.className = 'banner paper';
+    const src = status.use_mock_data ? 'synthetic data' : 'real market data';
+    el.textContent = `PAPER TRADING — SIMULATION MODE (${src}) — no real money at risk`;
+  }
+}
+
+function renderCards(summary, status) {
+  const cards = [
+    { label: 'Total Trades', value: summary.total_trades, cls: '' },
+    { label: 'Win Rate (settled)', value: fmtPct(summary.win_rate), cls: summary.win_rate === 1 ? 'pos' : '' },
+    { label: 'Locked-In Profit', value: fmtUsd(summary.total_locked_in_profit_usd), cls: summary.total_locked_in_profit_usd >= 0 ? 'pos' : 'neg' },
+    { label: 'Stake Deployed', value: fmtUsd(summary.total_stake_usd), cls: '' },
+    { label: 'Avg Edge Captured', value: (summary.avg_edge_pct ?? 0).toFixed(2) + '%', cls: '' },
+    { label: 'Open Exposure', value: fmtUsd(status.open_exposure_usd), cls: '' },
+    { label: 'P50 Latency', value: (summary.p50_latency_ms ?? 0).toFixed(0) + ' ms', cls: '' },
+    { label: 'P95 Latency', value: (summary.p95_latency_ms ?? 0).toFixed(0) + ' ms', cls: '' },
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c => `
+    <div class="card">
+      <div class="label">${c.label}</div>
+      <div class="value ${c.cls}">${c.value}</div>
+    </div>
+  `).join('');
+}
+
+function renderChart(series) {
+  const ctx = document.getElementById('pnlChart');
+  const labels = series.map(p => fmtTime(p.ts));
+  const data = series.map(p => p.cumulative_pnl_usd);
+
+  if (!chart) {
+    chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Cumulative locked-in profit ($)',
+          data,
+          borderColor: '#26a69a',
+          backgroundColor: 'rgba(38,166,154,0.12)',
+          fill: true,
+          tension: 0.25,
+          pointRadius: 0,
+        }],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#8b93a7', maxTicksLimit: 8 }, grid: { color: '#232838' } },
+          y: { ticks: { color: '#8b93a7' }, grid: { color: '#232838' } },
+        },
+      },
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = data;
+    chart.update('none');
+  }
+}
+
+function renderTrades(trades) {
+  const wrap = document.getElementById('tradesTableWrap');
+  if (!trades.length) {
+    wrap.innerHTML = '<div class="empty">No trades yet. Waiting for the bot to detect a qualifying gap…</div>';
+    return;
+  }
+  const rows = trades.map(t => `
+    <tr>
+      <td>${fmtTime(t.ts)}</td>
+      <td><span class="badge ${t.signal_type}">${t.signal_type}</span></td>
+      <td>${t.event_id ?? ''}</td>
+      <td class="num">${t.edge_pct.toFixed(2)}%</td>
+      <td class="num">${(t.confidence * 100).toFixed(0)}%</td>
+      <td class="num">${fmtUsd(t.stake_usd)}</td>
+      <td class="num pnl ${t.locked_in_profit_usd >= 0 ? 'pos' : 'neg'}">${fmtUsd(t.locked_in_profit_usd)}</td>
+    </tr>
+  `).join('');
+  wrap.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Time</th><th>Type</th><th>Event</th><th>Edge</th><th>Confidence</th><th>Stake</th><th>Locked-In P&amp;L</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+async function refresh() {
+  let status, summary, trades, series;
+  try {
+    [status, summary, trades, series] = await Promise.all([
+      fetchJson('/api/status'),
+      fetchJson('/api/summary'),
+      fetchJson('/api/trades?limit=50'),
+      fetchJson('/api/pnl_timeseries'),
+    ]);
+  } catch (e) {
+    document.getElementById('banner').className = 'banner offline';
+    document.getElementById('banner').textContent = 'Could not reach dashboard API: ' + e;
+    return;
+  }
+
+  // Render each widget independently so a failure in one (e.g. a charting
+  // error) doesn't blank out the rest of an otherwise-working dashboard.
+  try { renderBanner(status); } catch (e) { console.error('renderBanner failed', e); }
+  try { renderCards(summary, status); } catch (e) { console.error('renderCards failed', e); }
+  try { renderChart(series); } catch (e) { console.error('renderChart failed', e); }
+  try { renderTrades(trades); } catch (e) { console.error('renderTrades failed', e); }
+
+  document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

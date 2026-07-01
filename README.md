@@ -105,6 +105,18 @@ python scripts/run_paper.py --config config/config.yaml
 ARBBOT_USE_MOCK_DATA=true python scripts/run_paper.py
 ```
 
+**Performance dashboard:** run this in a *second* terminal tab while the bot
+(above) is running, then open http://127.0.0.1:8787 in your browser:
+```bash
+python scripts/run_dashboard.py
+```
+It's read-only and cannot place trades — it just reads the same local
+`data/trades.db` file the bot writes to and shows a live-updating view of
+win rate, locked-in profit, latency, and recent trades. It also displays a
+prominent banner confirming whether the bot is in **paper (simulation)** or
+**live** mode, and turns amber if the risk manager has halted trading. No
+data is sent anywhere; both processes only talk to `localhost`.
+
 **Tests:**
 ```bash
 pytest

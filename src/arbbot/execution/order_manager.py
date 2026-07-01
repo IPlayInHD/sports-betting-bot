@@ -102,4 +102,17 @@ class OrderManager:
         latency_ms = (time.perf_counter() - start) * 1000.0
         logger.info("signal %s executed in %.1fms across %d leg(s)", signal.signal_id, latency_ms, len(results))
 
-        return Position(signal_id=signal.signal_id, orders=list(results))
+        position = Position(signal_id=signal.signal_id, orders=list(results))
+
+        # Unlike a directional value-edge bet, a true arbitrage's profit is
+        # mathematically locked in the instant every leg fills -- it does not
+        # depend on which outcome the game actually produces. So we can
+        # record it immediately rather than waiting for real-world
+        # settlement (which value-edge trades still require).
+        all_filled = all(o.status == OrderStatus.FILLED for o in results)
+        if signal.signal_type == SignalType.ARBITRAGE and all_filled:
+            total_implied_prob = signal.metadata.get("total_implied_prob")
+            if total_implied_prob:
+                position.guaranteed_profit_usd = total_stake_usd * (1.0 / total_implied_prob - 1.0)
+
+        return position

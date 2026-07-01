@@ -12,5 +12,6 @@ dist/
 logs/
 data/*.csv
 data/*.json
+data/*.db
 !data/.gitkeep
 .DS_Store
