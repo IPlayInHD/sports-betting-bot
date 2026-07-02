@@ -32,9 +32,10 @@ class GammaClient:
         return self._session
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, max=4))
-    async def fetch_active_sports_markets(self, tag: str = "sports", limit: int = 200) -> list[dict]:
+    async def fetch_active_markets(self, tag: str = "sports", limit: int = 200) -> list[dict]:
         """Return raw Gamma market dicts for currently active, non-closed markets
-        tagged as sports. Caller is responsible for team/date matching.
+        with the given tag (e.g. "sports", "crypto"). Caller is responsible
+        for any matching/parsing against other venues.
         """
         session = await self._get_session()
         params = {

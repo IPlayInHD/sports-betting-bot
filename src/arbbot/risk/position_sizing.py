@@ -93,6 +93,44 @@ def size_crypto_opportunity(
     return base_cap * max(0.25, opportunity.confidence)
 
 
+def size_polycrypto_opportunity(
+    opportunity: MarketOpportunity,
+    bankroll_usd: float,
+    max_stake_per_trade_pct: float,
+    max_stake_per_trade_usd: float,
+    kelly_fraction_cap: float = 0.15,
+) -> float:
+    """Two sizing regimes matching the two polycrypto strategies:
+
+    * complement is riskless once filled -> full risk-managed cap scaled by
+      confidence, bounded by 10% of the thinner leg's book depth (same
+      convention as sports arbitrage sizing).
+    * spot_anchor is a model-based directional bet -> fractional Kelly on
+      the model's win probability, like the sports value_edge layer.
+    """
+    pct_cap = bankroll_usd * (max_stake_per_trade_pct / 100.0)
+    base_cap = min(pct_cap, max_stake_per_trade_usd)
+
+    if opportunity.metadata.get("strategy") == "complement":
+        stake = base_cap * max(0.25, opportunity.confidence)
+        liquidity = opportunity.metadata.get("min_leg_liquidity_usd")
+        if liquidity is not None:
+            stake = min(stake, liquidity * 0.10)
+        return max(0.0, stake)
+
+    model_prob = opportunity.metadata.get("model_prob")
+    side = opportunity.metadata.get("side")
+    if model_prob is None or side not in ("yes", "no") or not opportunity.legs:
+        return 0.0
+    win_prob = model_prob if side == "yes" else 1.0 - model_prob
+    price = opportunity.legs[0].get("price", 0.0)
+    if price <= 0:
+        return 0.0
+    full_kelly = kelly_fraction(win_prob, 1.0 / price)
+    stake = full_kelly * kelly_fraction_cap * max(0.1, opportunity.confidence) * bankroll_usd
+    return max(0.0, min(stake, base_cap))
+
+
 def size_signal(
     signal: GapSignal,
     bankroll_usd: float,

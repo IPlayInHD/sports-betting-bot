@@ -4,6 +4,9 @@ A multi-layer bot that detects pricing gaps across multiple markets and
 (optionally) trades on them:
 - **Sports**: sportsbook odds vs. Polymarket (riskless cross-market arbitrage)
 - **Crypto**: cross-exchange price gaps for the same coin (Coinbase/Kraken/Binance)
+- **Polymarket crypto** (`markets/polycrypto/`): Polymarket's crypto prediction
+  markets vs. spot exchanges — a riskless YES+NO complement-arbitrage layer
+  plus a model-based spot-anchored layer (see its section below)
 
 It defaults to **paper trading** and treats live trading as an explicit,
 multi-step opt-in. Forex, stocks/ETFs, and futures/options arbitrage are
@@ -58,7 +61,25 @@ planned but not yet implemented -- see "Roadmap" at the bottom.
 10. Monitoring            monitoring/*                   win rate, P&L, latency percentiles
 ```
 
-`main.py` wires these into a single asyncio polling loop.
+`main.py` wires these into per-market asyncio polling loops (sports, crypto,
+polycrypto), each with two frequency mechanisms from `strategy/adaptive.py`:
+
+- **Adaptive burst polling**: when a cycle detects an opportunity, that loop
+  immediately drops to `polling.burst_interval_sec` (default 0.4s) -- gaps
+  cluster in time, so one hit is evidence the venue is temporarily lagging --
+  then decays geometrically back to its base interval across quiet cycles.
+  This concentrates the request budget where the action is instead of
+  hammering every API at a fixed rate.
+- **Cooldown throttle**: the flip side of polling faster. A persistent gap
+  would otherwise re-fire every cycle and stack near-duplicate trades on one
+  underlying mispricing (one correlated position pretending to be several
+  independent ones); after an execution, re-detections of the same
+  market/symbol are skipped for `cooldown_sec` and logged to the dashboard's
+  opportunity feed with that reason.
+
+The Polymarket CLOB read path also prices all outcome tokens concurrently
+(bounded by a semaphore) rather than sequentially, so a scan of N markets is
+bounded by the slowest request instead of the sum.
 
 ### Layer 4: why this is "low risk, keep gaps low, high frequency"
 
@@ -109,6 +130,48 @@ Public price feeds (Coinbase, Kraken, Binance/Binance.US) need no API key;
 live order placement needs one key/secret pair per exchange
 (`CRYPTO_<EXCHANGE>_API_KEY`/`_SECRET` in `.env`).
 
+## Polymarket crypto arbitrage (`markets/polycrypto/`)
+
+Runs as a third independent loop (`config.yaml`'s `markets.polymarket_crypto`
+section) scanning Polymarket's crypto prediction markets. Two layers:
+
+**Layer A -- complement arbitrage (riskless, primary).** A binary Polymarket
+market pays exactly $1/share to the winning side. Whenever `YES ask + NO ask
+< $1` after the fee buffer, the bot buys both sides in equal share counts and
+locks in the difference regardless of how the market resolves -- the
+prediction-market version of the sports surebet, except both legs execute on
+the *same* venue (no cross-venue matching risk, both automatable). Like the
+other arbitrage layers, `min_edge_pct` defaults low (0.4%) to favor many
+small resolution-proof gaps over rare big ones.
+
+**Layer B -- spot-anchored gaps (statistical, NOT riskless).** Threshold
+markets ("Will BTC be above $70,000 on July 31?") are parsed
+(`polycrypto/parser.py`) and priced against a multi-exchange consensus spot
+price using a zero-drift lognormal model with per-asset volatility
+assumptions (`polycrypto/pricing.py` -- the same first-order model desks use
+to sanity-check binary option quotes; touch markets use the reflection
+principle). When Polymarket's quote disagrees with the model by a wide margin
+(default: 6+ probability points AND a multi-factor confidence score >= 0.75
+built from sigma-distance, liquidity, spread, and time-to-expiry), the bot
+buys the cheap side, sized by fractional Kelly like the sports value-edge
+layer. **The model can simply be wrong** (crypto vol is regime-dependent);
+this layer is a directional bet, its positions stay OPEN until the market
+resolves, and you can disable it with `spot_anchor.enabled: false` while
+keeping the riskless complement layer.
+
+## Running on a small bankroll ($50-100)
+
+Defaults are tuned for this (`risk.bankroll_usd: 50`):
+
+- `risk.min_stake_usd` (default $1) skips any trade sized below Polymarket's
+  ~$1 order minimum instead of submitting an unfillable order.
+- The polycrypto family uses a 4% per-trade cap (vs 2% elsewhere) so that
+  after confidence scaling, riskless complement trades still clear that
+  minimum -- $1-2 stakes on a $50 bankroll.
+- Expect profits proportional to size: a 0.5% edge on a $2 stake is a penny.
+  At this scale the bot is primarily a learning/validation instrument; the
+  same code and risk limits scale up if you ever choose to fund it further.
+
 ## Setup
 
 ```bash
@@ -144,12 +207,24 @@ ARBBOT_USE_MOCK_DATA=true python scripts/run_paper.py
 python scripts/run_dashboard.py
 ```
 It's read-only and cannot place trades — it just reads the same local
-`data/trades.db` file the bot writes to and shows a live-updating view of
-win rate, locked-in profit, latency, recent trades, and a breakdown by
-market (sports vs. crypto). It also displays a prominent banner confirming
-whether the bot is in **paper (simulation)** or **live** mode, and turns
-amber if the risk manager has halted trading. No data is sent anywhere;
-both processes only talk to `localhost`.
+`data/trades.db` file the bot writes to. The terminal-style view shows:
+
+- KPI tiles: locked-in P&L, bankroll/exposure, win rate, trades (total and
+  last hour), detections/hr, average edge, execution latency (p50/p95)
+- the equity curve (cumulative locked-in P&L) and an edge-distribution
+  histogram of executed trades
+- a **live opportunity feed**: every detection the bot makes — executed *or*
+  skipped, with the exact reason (cooldown, stake below minimum, exposure
+  cap, risk halt…) — so you can see what it's seeing, not just what it traded
+- an opportunity funnel (detected → executed/skipped), strategy mix, and a
+  per-market-family breakdown (sports / crypto x-exchange / Polymarket crypto)
+- engine cadence chips showing each loop's current adaptive polling interval
+  (amber ⚡ = burst mode after a detection)
+
+It also displays a prominent banner confirming whether the bot is in
+**paper (simulation)** or **live** mode, and turns amber if the risk manager
+has halted trading. No data is sent anywhere; both processes only talk to
+`localhost`.
 
 **Tests:**
 ```bash
@@ -177,7 +252,8 @@ above. Before enabling this, re-read "Read this first."
 
 ## Roadmap
 
-Sports and crypto arbitrage are implemented and tested. Not yet built:
+Sports, crypto cross-exchange, and Polymarket-crypto arbitrage are
+implemented and tested. Not yet built:
 
 - **Forex** (triangular arbitrage): needs a broker API with live bid/ask
   (e.g. an OANDA demo account, which is free); real edge on major pairs is

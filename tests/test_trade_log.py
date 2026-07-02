@@ -56,6 +56,64 @@ def test_record_trade_and_query(tmp_path):
     assert row["stake_usd"] == 15.0
 
 
+def test_record_heartbeat_stores_poll_intervals(tmp_path):
+    conn = trade_log.get_connection(tmp_path / "trades.db")
+    trade_log.record_startup(conn, mode="paper", use_mock=True, bankroll_usd=50.0)
+
+    trade_log.record_heartbeat(
+        conn,
+        trading_halted=False,
+        halt_reason="",
+        open_exposure_usd=0.0,
+        poll_intervals={"crypto": 0.4, "polycrypto": 1.5},
+    )
+    row = conn.execute("SELECT poll_intervals FROM status WHERE id = 1").fetchone()
+    assert '"crypto": 0.4' in row["poll_intervals"]
+
+
+def test_record_opportunity_and_query(tmp_path):
+    conn = trade_log.get_connection(tmp_path / "trades.db")
+
+    trade_log.record_opportunity(
+        conn,
+        family="polycrypto",
+        strategy="complement",
+        symbol="Will Bitcoin be above $70,000?",
+        detail="Will Bitcoin be above $70,000?",
+        edge_pct=1.2,
+        confidence=0.9,
+        status="skipped",
+        reason="cooldown active",
+    )
+
+    rows = conn.execute("SELECT * FROM opportunities").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["family"] == "polycrypto"
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["reason"] == "cooldown active"
+
+
+def test_opportunity_table_stays_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(trade_log, "_MAX_OPPORTUNITY_ROWS", 5)
+    conn = trade_log.get_connection(tmp_path / "trades.db")
+
+    for i in range(12):
+        trade_log.record_opportunity(
+            conn,
+            family="crypto",
+            strategy="cross_exchange",
+            symbol=f"SYM-{i}",
+            detail="",
+            edge_pct=0.5,
+            confidence=1.0,
+            status="executed",
+        )
+
+    rows = conn.execute("SELECT symbol FROM opportunities ORDER BY id").fetchall()
+    assert len(rows) == 5
+    assert rows[0]["symbol"] == "SYM-7"  # oldest rows pruned first
+
+
 def test_record_trade_upserts_on_duplicate_signal_id(tmp_path):
     db_path = tmp_path / "trades.db"
     conn = trade_log.get_connection(db_path)

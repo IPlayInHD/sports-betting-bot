@@ -58,11 +58,25 @@ class ClobMarketDataClient(PolymarketDataClient):
         except (aiohttp.ClientError, ValueError, TypeError, asyncio.TimeoutError):
             return None
 
-    async def fetch_sports_markets(self) -> list[PolymarketQuote]:
-        markets = await self._gamma.fetch_active_sports_markets()
+    async def fetch_quotes_for_markets(
+        self, markets: list[dict], max_concurrent_requests: int = 10
+    ) -> list[PolymarketQuote]:
+        """Fetch best bid/ask for every outcome token of the given Gamma
+        market dicts. All tokens are priced concurrently (bounded by a
+        semaphore) rather than one market at a time: with N markets in play
+        the read path is bounded by the slowest request, not the sum, which
+        directly raises how often the detection layers get fresh books.
+        """
         session = await self._get_session()
-        quotes: list[PolymarketQuote] = []
+        semaphore = asyncio.Semaphore(max_concurrent_requests)
 
+        async def _fetch_both(token_id: str) -> tuple[float | None, float | None]:
+            async with semaphore:
+                return await asyncio.gather(
+                    self._fetch_price(session, token_id, "buy"), self._fetch_price(session, token_id, "sell")
+                )
+
+        pending: list[tuple[dict, str, str, float]] = []
         for m in markets:
             outcomes = m["outcomes"]
             token_ids = m["token_ids"]
@@ -72,27 +86,36 @@ class ClobMarketDataClient(PolymarketDataClient):
                 end_ts = dateutil_parser.isoparse(m["end_date_iso"]).timestamp() if m.get("end_date_iso") else 0.0
             except (ValueError, TypeError):
                 end_ts = 0.0
-
             for outcome_name, token_id in zip(outcomes, token_ids):
-                bid_task = self._fetch_price(session, token_id, "buy")
-                ask_task = self._fetch_price(session, token_id, "sell")
-                bid, ask = await asyncio.gather(bid_task, ask_task)
-                if bid is None or ask is None:
-                    continue
-                quotes.append(
-                    PolymarketQuote(
-                        market_id=m["condition_id"] or "",
-                        token_id=token_id,
-                        question=m["question"],
-                        outcome_name=outcome_name,
-                        best_bid=bid,
-                        best_ask=ask,
-                        liquidity_usd=m["liquidity_usd"],
-                        end_date=end_ts,
-                        observed_at=time.time(),
-                    )
+                pending.append((m, outcome_name, token_id, end_ts))
+
+        prices = await asyncio.gather(*(_fetch_both(token_id) for _, _, token_id, _ in pending))
+
+        quotes: list[PolymarketQuote] = []
+        for (m, outcome_name, token_id, end_ts), (bid, ask) in zip(pending, prices):
+            if bid is None or ask is None:
+                continue
+            quotes.append(
+                PolymarketQuote(
+                    market_id=m["condition_id"] or "",
+                    token_id=token_id,
+                    question=m["question"],
+                    outcome_name=outcome_name,
+                    best_bid=bid,
+                    best_ask=ask,
+                    liquidity_usd=m["liquidity_usd"],
+                    end_date=end_ts,
+                    observed_at=time.time(),
                 )
+            )
         return quotes
+
+    async def fetch_markets_by_tag(self, tag: str, limit: int = 200) -> list[PolymarketQuote]:
+        markets = await self._gamma.fetch_active_markets(tag=tag, limit=limit)
+        return await self.fetch_quotes_for_markets(markets)
+
+    async def fetch_sports_markets(self) -> list[PolymarketQuote]:
+        return await self.fetch_markets_by_tag("sports")
 
     async def close(self) -> None:
         await self._gamma.close()

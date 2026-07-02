@@ -40,6 +40,14 @@ from arbbot.markets.crypto.detector import detect_crypto_arbitrage
 from arbbot.markets.crypto.exchanges import BinancePriceFeed, CoinbasePriceFeed, CryptoPriceFeed, KrakenPriceFeed
 from arbbot.markets.crypto.execution import CcxtLiveExecutionClient, CryptoOrderManager, PaperCryptoExecutionClient
 from arbbot.markets.crypto.mock import MockCryptoPriceFeed
+from arbbot.markets.polycrypto.data import PolymarketCryptoDataClient, PolymarketCryptoFeed
+from arbbot.markets.polycrypto.detector import (
+    SpotAnchorConfig,
+    detect_complement_arbitrage,
+    detect_spot_anchored_gaps,
+)
+from arbbot.markets.polycrypto.execution import PolycryptoOrderManager
+from arbbot.markets.polycrypto.mock import MockPolymarketCryptoFeed
 from arbbot.matching.market_matcher import match_markets
 from arbbot.models import CryptoQuote, GapSignal, SportsbookQuote
 from arbbot.monitoring import trade_log
@@ -52,8 +60,9 @@ from arbbot.polymarket.base import PolymarketDataClient
 from arbbot.polymarket.clob_execution import PolymarketLiveExecutionClient
 from arbbot.polymarket.clob_market_data import ClobMarketDataClient
 from arbbot.polymarket.mock_client import MockPolymarketClient
-from arbbot.risk.position_sizing import size_crypto_opportunity, size_signal
+from arbbot.risk.position_sizing import size_crypto_opportunity, size_polycrypto_opportunity, size_signal
 from arbbot.risk.risk_manager import RiskLimits, RiskManager
+from arbbot.strategy.adaptive import AdaptivePoller, SignalThrottle
 from arbbot.strategy.arbitrage import detect_arbitrage
 from arbbot.strategy.confidence import score_confidence
 from arbbot.strategy.filters import ExposureTracker, FilterConfig, run_filter_pipeline
@@ -72,7 +81,10 @@ async def _run_cycle(
     metrics: MetricsTracker,
     filter_cfg: FilterConfig,
     db_conn,
-) -> None:
+) -> int:
+    """Returns the number of signals that survived the filter pipeline, which
+    the adaptive poller uses to decide whether to burst-poll.
+    """
     odds_results = await asyncio.gather(
         *(odds_provider.fetch_quotes(sport) for sport in cfg.sports), return_exceptions=True
     )
@@ -87,10 +99,10 @@ async def _run_cycle(
         polymarket_quotes = await poly_client.fetch_sports_markets()
     except Exception as exc:  # noqa: BLE001 - external API boundary
         logger.error("failed to fetch polymarket markets: %s", exc)
-        return
+        return 0
 
     if not sportsbook_quotes or not polymarket_quotes:
-        return
+        return 0
 
     matches = match_markets(
         sportsbook_quotes,
@@ -99,7 +111,7 @@ async def _run_cycle(
         max_date_skew_hours=cfg.matching.max_date_skew_hours,
     )
     if not matches:
-        return
+        return 0
 
     signals: list[GapSignal] = []
     if cfg.strategy.arbitrage.enabled:
@@ -120,7 +132,7 @@ async def _run_cycle(
             )
         )
     if not signals:
-        return
+        return 0
 
     accepted = run_filter_pipeline(signals, filter_cfg, exposure_tracker)
 
@@ -134,9 +146,27 @@ async def _run_cycle(
             kelly_fraction_cap=cfg.strategy.value_edge.kelly_fraction,
         )
 
-        can_trade, reason = risk_manager.can_trade(stake_usd)
-        if not can_trade:
-            logger.info("signal %s skipped: %s", signal.signal_id, reason)
+        event_id = signal.metadata.get("event_id", signal.matched_market.match_id)
+        skip_reason = None
+        if stake_usd < cfg.risk.min_stake_usd:
+            skip_reason = f"sized stake ${stake_usd:.2f} below min_stake_usd"
+        else:
+            can_trade, reason = risk_manager.can_trade(stake_usd)
+            if not can_trade:
+                skip_reason = reason
+        if skip_reason:
+            logger.info("signal %s skipped: %s", signal.signal_id, skip_reason)
+            trade_log.record_opportunity(
+                db_conn,
+                family="sports",
+                strategy=signal.signal_type.value,
+                symbol=event_id,
+                detail=event_id,
+                edge_pct=signal.edge_pct,
+                confidence=signal.confidence,
+                status="skipped",
+                reason=skip_reason,
+            )
             continue
 
         position = await order_manager.execute_signal(signal, stake_usd)
@@ -146,12 +176,22 @@ async def _run_cycle(
         latency_ms = (position.orders[0].submitted_at - signal.created_at) * 1000.0 if position.orders else 0.0
         metrics.record_latency(latency_ms)
 
+        trade_log.record_opportunity(
+            db_conn,
+            family="sports",
+            strategy=signal.signal_type.value,
+            symbol=event_id,
+            detail=event_id,
+            edge_pct=signal.edge_pct,
+            confidence=signal.confidence,
+            status="executed",
+        )
         trade_log.record_trade(
             db_conn,
             signal_id=signal.signal_id,
             mode=cfg.mode,
             signal_type=signal.signal_type.value,
-            event_id=signal.metadata.get("event_id", signal.matched_market.match_id),
+            event_id=event_id,
             edge_pct=signal.edge_pct,
             confidence=signal.confidence,
             stake_usd=stake_usd,
@@ -174,6 +214,8 @@ async def _run_cycle(
             locked_in_profit_usd=position.guaranteed_profit_usd,
         )
 
+    return len(accepted)
+
 
 async def _run_crypto_cycle(
     cfg: AppConfig,
@@ -181,8 +223,9 @@ async def _run_crypto_cycle(
     exposure_tracker: ExposureTracker,
     risk_manager: RiskManager,
     order_manager: CryptoOrderManager,
+    throttle: SignalThrottle,
     db_conn,
-) -> None:
+) -> int:
     crypto_cfg = cfg.markets.crypto
 
     results = await asyncio.gather(
@@ -196,7 +239,7 @@ async def _run_crypto_cycle(
         quotes.extend(result)
 
     if not quotes:
-        return
+        return 0
 
     opportunities = detect_crypto_arbitrage(
         quotes,
@@ -206,10 +249,27 @@ async def _run_crypto_cycle(
     )
 
     for opp in opportunities:
+        def _skip(reason: str, opp=opp) -> None:
+            logger.info("opportunity %s skipped: %s", opp.opportunity_id, reason)
+            trade_log.record_opportunity(
+                db_conn,
+                family="crypto",
+                strategy="cross_exchange",
+                symbol=opp.symbol,
+                detail=f"{opp.metadata.get('buy_exchange')} -> {opp.metadata.get('sell_exchange')}",
+                edge_pct=opp.edge_pct,
+                confidence=opp.confidence,
+                status="skipped",
+                reason=reason,
+            )
+
         exposure_key = f"crypto:{opp.symbol}"
+        if not throttle.ready(exposure_key):
+            _skip("cooldown active (recently traded this symbol)")
+            continue
         exposure_result = exposure_tracker.check_key(exposure_key, crypto_cfg.max_concurrent_positions_per_symbol)
         if not exposure_result.passed:
-            logger.info("opportunity %s skipped: %s", opp.opportunity_id, exposure_result.reason)
+            _skip(exposure_result.reason)
             continue
 
         stake_usd = size_crypto_opportunity(
@@ -218,15 +278,19 @@ async def _run_crypto_cycle(
             max_stake_per_trade_pct=crypto_cfg.max_stake_per_trade_pct,
             max_stake_per_trade_usd=crypto_cfg.max_stake_per_trade_usd,
         )
+        if stake_usd < cfg.risk.min_stake_usd:
+            _skip(f"sized stake ${stake_usd:.2f} below min_stake_usd")
+            continue
 
         can_trade, reason = risk_manager.can_trade(stake_usd)
         if not can_trade:
-            logger.info("opportunity %s skipped: %s", opp.opportunity_id, reason)
+            _skip(reason)
             continue
 
         position = await order_manager.execute_opportunity(opp, stake_usd)
         exposure_tracker.on_open_key(exposure_key)
         risk_manager.on_position_opened(stake_usd)
+        throttle.fire(exposure_key)
 
         # Unlike sports (which waits on a real-world game outcome), both legs
         # of a crypto arb settle synchronously -- the round trip is already
@@ -238,6 +302,16 @@ async def _run_crypto_cycle(
 
         latency_ms = (position.orders[0].submitted_at - opp.created_at) * 1000.0 if position.orders else 0.0
 
+        trade_log.record_opportunity(
+            db_conn,
+            family="crypto",
+            strategy="cross_exchange",
+            symbol=opp.symbol,
+            detail=f"{opp.metadata.get('buy_exchange')} -> {opp.metadata.get('sell_exchange')}",
+            edge_pct=opp.edge_pct,
+            confidence=opp.confidence,
+            status="executed",
+        )
         trade_log.record_trade(
             db_conn,
             signal_id=opp.opportunity_id,
@@ -266,6 +340,179 @@ async def _run_crypto_cycle(
             buy_exchange=opp.metadata.get("buy_exchange"),
             sell_exchange=opp.metadata.get("sell_exchange"),
         )
+
+    return len(opportunities)
+
+
+async def _run_polycrypto_cycle(
+    cfg: AppConfig,
+    poly_feed: PolymarketCryptoFeed,
+    spot_feeds: list[CryptoPriceFeed],
+    exposure_tracker: ExposureTracker,
+    risk_manager: RiskManager,
+    order_manager: PolycryptoOrderManager,
+    throttle: SignalThrottle,
+    db_conn,
+) -> int:
+    pc_cfg = cfg.markets.polymarket_crypto
+
+    quotes_task = poly_feed.fetch_crypto_markets()
+    if pc_cfg.spot_anchor.enabled and spot_feeds:
+        spot_results = await asyncio.gather(
+            quotes_task,
+            *(feed.fetch_quotes(cfg.markets.crypto.symbols) for feed in spot_feeds),
+            return_exceptions=True,
+        )
+        quotes_result, spot_quote_results = spot_results[0], spot_results[1:]
+    else:
+        quotes_result = await quotes_task
+        spot_quote_results = []
+
+    if isinstance(quotes_result, Exception):
+        logger.error("failed to fetch polymarket crypto markets: %s", quotes_result)
+        return 0
+    poly_quotes = quotes_result
+    if not poly_quotes:
+        return 0
+
+    # Average each symbol's mid across whichever exchanges responded this
+    # cycle -- a multi-venue consensus anchor rather than trusting one feed.
+    mids_by_symbol: dict[str, list[float]] = {}
+    for result in spot_quote_results:
+        if isinstance(result, Exception):
+            continue
+        for q in result:
+            mids_by_symbol.setdefault(q.symbol, []).append(q.mid)
+    spot_mids = {symbol: sum(mids) / len(mids) for symbol, mids in mids_by_symbol.items()}
+
+    opportunities = []
+    if pc_cfg.complement.enabled:
+        opportunities.extend(
+            detect_complement_arbitrage(
+                poly_quotes,
+                min_edge_pct=pc_cfg.complement.min_edge_pct,
+                max_edge_pct=pc_cfg.complement.max_edge_pct,
+                fee_buffer_pct=pc_cfg.complement.fee_buffer_pct,
+                min_liquidity_usd=pc_cfg.min_liquidity_usd,
+                max_spread_cents=pc_cfg.max_spread_cents,
+            )
+        )
+    if pc_cfg.spot_anchor.enabled and spot_mids:
+        opportunities.extend(
+            detect_spot_anchored_gaps(
+                poly_quotes,
+                spot_mids,
+                SpotAnchorConfig(
+                    min_edge_pct=pc_cfg.spot_anchor.min_edge_pct,
+                    max_edge_pct=pc_cfg.spot_anchor.max_edge_pct,
+                    min_confidence=pc_cfg.spot_anchor.min_confidence,
+                    max_days_to_expiry=pc_cfg.spot_anchor.max_days_to_expiry,
+                    annualized_vol=pc_cfg.spot_anchor.annualized_vol,
+                    default_annualized_vol=pc_cfg.spot_anchor.default_annualized_vol,
+                ),
+                min_liquidity_usd=pc_cfg.min_liquidity_usd,
+                max_spread_cents=pc_cfg.max_spread_cents,
+            )
+        )
+
+    for opp in opportunities:
+        strategy = opp.metadata.get("strategy", "complement")
+        question = str(opp.metadata.get("question", ""))[:120]
+
+        def _skip(reason: str, opp=opp, strategy=strategy, question=question) -> None:
+            logger.info("polycrypto opportunity %s skipped: %s", opp.opportunity_id, reason)
+            trade_log.record_opportunity(
+                db_conn,
+                family="polycrypto",
+                strategy=strategy,
+                symbol=opp.symbol,
+                detail=question,
+                edge_pct=opp.edge_pct,
+                confidence=opp.confidence,
+                status="skipped",
+                reason=reason,
+            )
+
+        exposure_key = f"polycrypto:{opp.metadata.get('market_id', opp.symbol)}"
+        if not throttle.ready(exposure_key):
+            _skip("cooldown active (recently traded this market)")
+            continue
+        exposure_result = exposure_tracker.check_key(exposure_key, pc_cfg.max_concurrent_positions_per_market)
+        if not exposure_result.passed:
+            _skip(exposure_result.reason)
+            continue
+
+        stake_usd = size_polycrypto_opportunity(
+            opp,
+            bankroll_usd=cfg.risk.bankroll_usd,
+            max_stake_per_trade_pct=pc_cfg.max_stake_per_trade_pct,
+            max_stake_per_trade_usd=pc_cfg.max_stake_per_trade_usd,
+            kelly_fraction_cap=pc_cfg.spot_anchor.kelly_fraction,
+        )
+        if stake_usd < cfg.risk.min_stake_usd:
+            _skip(f"sized stake ${stake_usd:.2f} below min_stake_usd")
+            continue
+
+        can_trade, reason = risk_manager.can_trade(stake_usd)
+        if not can_trade:
+            _skip(reason)
+            continue
+
+        position = await order_manager.execute_opportunity(opp, stake_usd)
+        exposure_tracker.on_open_key(exposure_key)
+        risk_manager.on_position_opened(stake_usd)
+        throttle.fire(exposure_key)
+
+        # Complement trades settle at fill time (every YES+NO pair pays $1
+        # regardless of resolution), so release exposure immediately like
+        # crypto cross-exchange arb. Spot-anchor positions stay open until
+        # the market actually resolves.
+        if position.guaranteed_profit_usd is not None:
+            risk_manager.on_position_closed(stake_usd, position.guaranteed_profit_usd)
+            exposure_tracker.on_close_key(exposure_key)
+
+        latency_ms = (position.orders[0].submitted_at - opp.created_at) * 1000.0 if position.orders else 0.0
+
+        trade_log.record_opportunity(
+            db_conn,
+            family="polycrypto",
+            strategy=strategy,
+            symbol=opp.symbol,
+            detail=question,
+            edge_pct=opp.edge_pct,
+            confidence=opp.confidence,
+            status="executed",
+        )
+        trade_log.record_trade(
+            db_conn,
+            signal_id=opp.opportunity_id,
+            mode=cfg.mode,
+            signal_type=f"polycrypto_{strategy}",
+            event_id=question or opp.symbol,
+            edge_pct=opp.edge_pct,
+            confidence=opp.confidence,
+            stake_usd=stake_usd,
+            locked_in_profit_usd=position.guaranteed_profit_usd,
+            latency_ms=latency_ms,
+            sportsbook_fraction=0.0,
+            polymarket_fraction=1.0,
+            market_family="polycrypto",
+        )
+
+        log_event(
+            logger,
+            logging.INFO,
+            "polycrypto opportunity executed",
+            opportunity_id=opp.opportunity_id,
+            strategy=strategy,
+            question=question,
+            edge_pct=round(opp.edge_pct, 3),
+            confidence=opp.confidence,
+            stake_usd=round(stake_usd, 2),
+            locked_in_profit_usd=position.guaranteed_profit_usd,
+        )
+
+    return len(opportunities)
 
 
 def _build_data_sources(cfg: AppConfig, secrets: Secrets) -> tuple[OddsProvider, PolymarketDataClient, bool]:
@@ -362,19 +609,21 @@ async def _sports_loop(
     order_manager: OrderManager,
     metrics: MetricsTracker,
     filter_cfg: FilterConfig,
+    poller: AdaptivePoller,
     db_conn,
 ) -> None:
-    poll_interval = min(cfg.polling.odds_poll_interval_sec, cfg.polling.polymarket_poll_interval_sec)
     while True:
         cycle_start = time.perf_counter()
+        found = 0
         try:
-            await _run_cycle(
+            found = await _run_cycle(
                 cfg, odds_provider, poly_client, exposure_tracker, risk_manager, order_manager, metrics, filter_cfg, db_conn
             )
         except Exception:  # noqa: BLE001 - keep the polling loop alive across transient errors
             logger.exception("unhandled error in sports polling cycle")
         if metrics.total_trades and metrics.total_trades % 10 == 0:
             log_event(logger, logging.INFO, "metrics snapshot", **metrics.summary())
+        poll_interval = poller.on_cycle(found)
         elapsed = time.perf_counter() - cycle_start
         await asyncio.sleep(max(0.0, poll_interval - elapsed))
 
@@ -385,26 +634,61 @@ async def _crypto_loop(
     exposure_tracker: ExposureTracker,
     risk_manager: RiskManager,
     order_manager: CryptoOrderManager,
+    poller: AdaptivePoller,
     db_conn,
 ) -> None:
-    poll_interval = cfg.markets.crypto.poll_interval_sec
+    throttle = SignalThrottle(cooldown_sec=cfg.markets.crypto.cooldown_sec)
     while True:
         cycle_start = time.perf_counter()
+        found = 0
         try:
-            await _run_crypto_cycle(cfg, price_feeds, exposure_tracker, risk_manager, order_manager, db_conn)
+            found = await _run_crypto_cycle(
+                cfg, price_feeds, exposure_tracker, risk_manager, order_manager, throttle, db_conn
+            )
         except Exception:  # noqa: BLE001 - keep the polling loop alive across transient errors
             logger.exception("unhandled error in crypto polling cycle")
+        throttle.prune()
+        poll_interval = poller.on_cycle(found)
         elapsed = time.perf_counter() - cycle_start
         await asyncio.sleep(max(0.0, poll_interval - elapsed))
 
 
-async def _heartbeat_loop(db_conn, risk_manager: RiskManager, interval_sec: float = 5.0) -> None:
+async def _polycrypto_loop(
+    cfg: AppConfig,
+    poly_feed: PolymarketCryptoFeed,
+    spot_feeds: list[CryptoPriceFeed],
+    exposure_tracker: ExposureTracker,
+    risk_manager: RiskManager,
+    order_manager: PolycryptoOrderManager,
+    poller: AdaptivePoller,
+    db_conn,
+) -> None:
+    throttle = SignalThrottle(cooldown_sec=cfg.markets.polymarket_crypto.cooldown_sec)
+    while True:
+        cycle_start = time.perf_counter()
+        found = 0
+        try:
+            found = await _run_polycrypto_cycle(
+                cfg, poly_feed, spot_feeds, exposure_tracker, risk_manager, order_manager, throttle, db_conn
+            )
+        except Exception:  # noqa: BLE001 - keep the polling loop alive across transient errors
+            logger.exception("unhandled error in polycrypto polling cycle")
+        throttle.prune()
+        poll_interval = poller.on_cycle(found)
+        elapsed = time.perf_counter() - cycle_start
+        await asyncio.sleep(max(0.0, poll_interval - elapsed))
+
+
+async def _heartbeat_loop(
+    db_conn, risk_manager: RiskManager, pollers: dict[str, AdaptivePoller], interval_sec: float = 5.0
+) -> None:
     while True:
         trade_log.record_heartbeat(
             db_conn,
             trading_halted=risk_manager.state.trading_halted,
             halt_reason=risk_manager.state.halt_reason,
             open_exposure_usd=risk_manager.state.open_exposure_usd,
+            poll_intervals={name: round(p.current_interval_sec, 3) for name, p in pollers.items()},
         )
         await asyncio.sleep(interval_sec)
 
@@ -444,27 +728,87 @@ async def run(cfg: AppConfig, secrets: Secrets) -> None:
         max_retries=cfg.execution.max_retries,
     )
 
+    def _make_poller(base_interval_sec: float) -> AdaptivePoller:
+        return AdaptivePoller(
+            base_interval_sec=base_interval_sec,
+            burst_interval_sec=cfg.polling.burst_interval_sec,
+            decay=cfg.polling.burst_decay,
+        )
+
+    pollers: dict[str, AdaptivePoller] = {}
+    pollers["sports"] = _make_poller(min(cfg.polling.odds_poll_interval_sec, cfg.polling.polymarket_poll_interval_sec))
     tasks = [
         asyncio.create_task(
             _sports_loop(
-                cfg, odds_provider, poly_client, exposure_tracker, risk_manager, order_manager, metrics, filter_cfg, db_conn
+                cfg,
+                odds_provider,
+                poly_client,
+                exposure_tracker,
+                risk_manager,
+                order_manager,
+                metrics,
+                filter_cfg,
+                pollers["sports"],
+                db_conn,
             )
         ),
-        asyncio.create_task(_heartbeat_loop(db_conn, risk_manager)),
     ]
 
     crypto_feeds: list[CryptoPriceFeed] = []
-    if cfg.markets.crypto.enabled:
+    needs_spot_feeds = cfg.markets.crypto.enabled or (
+        cfg.markets.polymarket_crypto.enabled and cfg.markets.polymarket_crypto.spot_anchor.enabled
+    )
+    if needs_spot_feeds:
         crypto_feeds = _build_crypto_price_feeds(cfg, use_mock)
+
+    if cfg.markets.crypto.enabled:
         crypto_exec_clients = _build_crypto_execution_clients(cfg, secrets, crypto_feeds)
         crypto_order_manager = CryptoOrderManager(
             client_for_exchange=crypto_exec_clients,
             order_timeout_sec=cfg.execution.order_timeout_sec,
             max_retries=cfg.execution.max_retries,
         )
+        pollers["crypto"] = _make_poller(cfg.markets.crypto.poll_interval_sec)
         tasks.append(
-            asyncio.create_task(_crypto_loop(cfg, crypto_feeds, exposure_tracker, risk_manager, crypto_order_manager, db_conn))
+            asyncio.create_task(
+                _crypto_loop(
+                    cfg, crypto_feeds, exposure_tracker, risk_manager, crypto_order_manager, pollers["crypto"], db_conn
+                )
+            )
         )
+
+    poly_crypto_feed: PolymarketCryptoFeed | None = None
+    if cfg.markets.polymarket_crypto.enabled:
+        poly_crypto_feed = (
+            MockPolymarketCryptoFeed()
+            if use_mock
+            else PolymarketCryptoDataClient(market_limit=cfg.markets.polymarket_crypto.market_limit)
+        )
+        # Both polycrypto strategies execute only Polymarket legs, so they
+        # share the sports pipeline's Polymarket execution client (paper in
+        # paper mode, py-clob-client behind the dual opt-in when live).
+        polycrypto_order_manager = PolycryptoOrderManager(
+            client=polymarket_exec,
+            order_timeout_sec=cfg.execution.order_timeout_sec,
+            max_retries=cfg.execution.max_retries,
+        )
+        pollers["polycrypto"] = _make_poller(cfg.markets.polymarket_crypto.poll_interval_sec)
+        tasks.append(
+            asyncio.create_task(
+                _polycrypto_loop(
+                    cfg,
+                    poly_crypto_feed,
+                    crypto_feeds,
+                    exposure_tracker,
+                    risk_manager,
+                    polycrypto_order_manager,
+                    pollers["polycrypto"],
+                    db_conn,
+                )
+            )
+        )
+
+    tasks.append(asyncio.create_task(_heartbeat_loop(db_conn, risk_manager, pollers)))
 
     try:
         await asyncio.gather(*tasks)
@@ -475,6 +819,8 @@ async def run(cfg: AppConfig, secrets: Secrets) -> None:
         await poly_client.close()
         for feed in crypto_feeds:
             await feed.close()
+        if poly_crypto_feed is not None:
+            await poly_crypto_feed.close()
         db_conn.close()
 
 

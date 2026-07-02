@@ -31,6 +31,7 @@ class MarketFamily(str, Enum):
 
     SPORTS = "sports"
     CRYPTO = "crypto"
+    POLYCRYPTO = "polycrypto"   # Polymarket crypto prediction markets vs. spot exchanges
     FOREX = "forex"
     EQUITIES = "equities"
     DERIVATIVES = "derivatives"

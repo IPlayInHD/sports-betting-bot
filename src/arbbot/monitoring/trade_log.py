@@ -9,6 +9,7 @@ bot process itself.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -41,9 +42,27 @@ CREATE TABLE IF NOT EXISTS status (
     trading_halted INTEGER,
     halt_reason TEXT,
     open_exposure_usd REAL,
-    bankroll_usd REAL
+    bankroll_usd REAL,
+    poll_intervals TEXT
+);
+
+CREATE TABLE IF NOT EXISTS opportunities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    family TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    symbol TEXT,
+    detail TEXT,
+    edge_pct REAL,
+    confidence REAL,
+    status TEXT NOT NULL,   -- 'executed' | 'skipped'
+    reason TEXT
 );
 """
+
+# The opportunity feed is diagnostic, not an accounting record like trades:
+# cap its size so a bot left running for weeks doesn't grow the DB unbounded.
+_MAX_OPPORTUNITY_ROWS = 2000
 
 
 def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -52,13 +71,17 @@ def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
-    # Migration for db files created before market_family existed:
+    # Migrations for db files created before newer columns existed:
     # CREATE TABLE IF NOT EXISTS won't retroactively add a new column.
-    try:
-        conn.execute("ALTER TABLE trades ADD COLUMN market_family TEXT NOT NULL DEFAULT 'sports'")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    for migration in (
+        "ALTER TABLE trades ADD COLUMN market_family TEXT NOT NULL DEFAULT 'sports'",
+        "ALTER TABLE status ADD COLUMN poll_intervals TEXT",
+    ):
+        try:
+            conn.execute(migration)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     return conn
 
 
@@ -84,14 +107,54 @@ def record_startup(conn: sqlite3.Connection, mode: str, use_mock: bool, bankroll
 
 
 def record_heartbeat(
-    conn: sqlite3.Connection, trading_halted: bool, halt_reason: str, open_exposure_usd: float
+    conn: sqlite3.Connection,
+    trading_halted: bool,
+    halt_reason: str,
+    open_exposure_usd: float,
+    poll_intervals: dict[str, float] | None = None,
 ) -> None:
     conn.execute(
         """
-        UPDATE status SET last_heartbeat = ?, trading_halted = ?, halt_reason = ?, open_exposure_usd = ?
+        UPDATE status SET last_heartbeat = ?, trading_halted = ?, halt_reason = ?, open_exposure_usd = ?,
+            poll_intervals = ?
         WHERE id = 1
         """,
-        (time.time(), int(trading_halted), halt_reason, open_exposure_usd),
+        (
+            time.time(),
+            int(trading_halted),
+            halt_reason,
+            open_exposure_usd,
+            json.dumps(poll_intervals) if poll_intervals else None,
+        ),
+    )
+    conn.commit()
+
+
+def record_opportunity(
+    conn: sqlite3.Connection,
+    family: str,
+    strategy: str,
+    symbol: str,
+    detail: str,
+    edge_pct: float,
+    confidence: float,
+    status: str,
+    reason: str = "",
+) -> None:
+    """Log every detected opportunity -- executed or skipped, with the skip
+    reason -- so the dashboard can show what the bot is seeing and why it
+    did (or didn't) act, not just the trades that made it through.
+    """
+    conn.execute(
+        """
+        INSERT INTO opportunities (ts, family, strategy, symbol, detail, edge_pct, confidence, status, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (time.time(), family, strategy, symbol, detail, edge_pct, confidence, status, reason),
+    )
+    conn.execute(
+        "DELETE FROM opportunities WHERE id <= (SELECT MAX(id) FROM opportunities) - ?",
+        (_MAX_OPPORTUNITY_ROWS,),
     )
     conn.commit()
 

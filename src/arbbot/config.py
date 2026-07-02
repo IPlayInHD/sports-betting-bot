@@ -17,6 +17,11 @@ class PollingConfig(BaseModel):
     odds_poll_interval_sec: float = 2.0
     polymarket_poll_interval_sec: float = 1.0
     max_quote_age_sec: float = 3.0
+    # Adaptive burst polling (strategy/adaptive.py): when a cycle finds an
+    # opportunity, that family's loop drops to burst_interval_sec and decays
+    # geometrically back to its base interval across quiet cycles.
+    burst_interval_sec: float = 0.4
+    burst_decay: float = 1.6
 
 
 class MatchingConfig(BaseModel):
@@ -57,6 +62,10 @@ class RiskConfig(BaseModel):
     max_daily_loss_pct: float = 5
     max_consecutive_losses: int = 5
     fee_buffer_pct: float = 1.0
+    # Smallest stake worth placing. Venues have minimum order sizes (~$1 on
+    # Polymarket) and with a $50-100 bankroll percentage sizing can produce
+    # sub-dollar stakes; anything below this is skipped instead of submitted.
+    min_stake_usd: float = 1.0
 
 
 class ExecutionConfig(BaseModel):
@@ -83,10 +92,58 @@ class CryptoMarketConfig(BaseModel):
     max_stake_per_trade_pct: float = 2.0
     max_stake_per_trade_usd: float = 50.0
     max_concurrent_positions_per_symbol: int = 1
+    # Once an opportunity on a symbol executes, ignore re-detections of the
+    # same gap for this long (strategy/adaptive.py SignalThrottle) -- burst
+    # polling would otherwise stack near-duplicate trades on one mispricing.
+    cooldown_sec: float = 20.0
+
+
+class PolycryptoComplementConfig(BaseModel):
+    enabled: bool = True
+    min_edge_pct: float = 0.4
+    max_edge_pct: float = 5.0
+    fee_buffer_pct: float = 0.2
+
+
+class PolycryptoSpotAnchorConfig(BaseModel):
+    enabled: bool = True
+    min_edge_pct: float = 6.0            # probability points of model-vs-quote gap required
+    max_edge_pct: float = 30.0
+    min_confidence: float = 0.75
+    max_days_to_expiry: float = 45.0
+    kelly_fraction: float = 0.15
+    # Assumed annualized volatility per spot symbol for the pricing model;
+    # symbols not listed fall back to default_annualized_vol.
+    annualized_vol: dict[str, float] = Field(
+        default_factory=lambda: {"BTC/USD": 0.55, "ETH/USD": 0.70, "SOL/USD": 0.90}
+    )
+    default_annualized_vol: float = 0.80
+
+
+class PolymarketCryptoConfig(BaseModel):
+    """Polymarket crypto prediction markets vs. spot exchanges (markets/polycrypto/)."""
+
+    enabled: bool = True
+    poll_interval_sec: float = 1.5
+    market_limit: int = 150
+    min_liquidity_usd: float = 250.0
+    # Absolute cents, not % of mid: cheap outcome tokens have huge relative
+    # spreads that are still tradeable in absolute terms.
+    max_spread_cents: float = 3.0
+    # 4% (vs 2% elsewhere) so a $50 bankroll still clears the ~$1 Polymarket
+    # order minimum after confidence scaling; the complement layer is riskless
+    # once filled, and the absolute-dollar cap keeps live sizes small anyway.
+    max_stake_per_trade_pct: float = 4.0
+    max_stake_per_trade_usd: float = 25.0
+    max_concurrent_positions_per_market: int = 1
+    cooldown_sec: float = 60.0
+    complement: PolycryptoComplementConfig = PolycryptoComplementConfig()
+    spot_anchor: PolycryptoSpotAnchorConfig = PolycryptoSpotAnchorConfig()
 
 
 class MarketsConfig(BaseModel):
     crypto: CryptoMarketConfig = CryptoMarketConfig()
+    polymarket_crypto: PolymarketCryptoConfig = PolymarketCryptoConfig()
 
 
 class AppConfig(BaseModel):

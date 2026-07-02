@@ -8,6 +8,11 @@ polling:
   odds_poll_interval_sec: 2.0
   polymarket_poll_interval_sec: 1.0
   max_quote_age_sec: 3.0        # Layer 6 staleness filter
+  # Adaptive burst polling: when a cycle detects an opportunity, that market's
+  # loop immediately drops to burst_interval_sec (gaps cluster in time), then
+  # decays geometrically back up to its base interval across quiet cycles.
+  burst_interval_sec: 0.4
+  burst_decay: 1.6
 
 sports:
   - basketball_nba
@@ -40,6 +45,7 @@ risk:
   bankroll_usd: 50
   max_stake_per_trade_pct: 2.0
   max_stake_per_trade_usd: 50
+  min_stake_usd: 1.0            # skip trades sized below venue minimums (Polymarket ~ $1)
   max_total_exposure_pct: 25
   max_daily_loss_pct: 5
   max_consecutive_losses: 5
@@ -66,3 +72,36 @@ markets:
     max_stake_per_trade_pct: 2.0
     max_stake_per_trade_usd: 50
     max_concurrent_positions_per_symbol: 1
+    cooldown_sec: 20           # ignore re-detections of a just-traded symbol for this long
+
+  # Polymarket crypto prediction markets vs. spot exchanges (markets/polycrypto/).
+  # Two layers: "complement" (riskless: YES ask + NO ask < $1, buy both) and
+  # "spot_anchor" (statistical: quote vs. a volatility model anchored to live
+  # spot prices -- NOT riskless, sized with fractional Kelly).
+  polymarket_crypto:
+    enabled: true
+    poll_interval_sec: 1.5
+    market_limit: 150          # how many active crypto markets to scan per cycle
+    min_liquidity_usd: 250
+    max_spread_cents: 3.0      # absolute YES/NO book spread cap, in cents
+    max_stake_per_trade_pct: 4.0   # higher than elsewhere so a $50 bankroll clears the ~$1 order minimum
+    max_stake_per_trade_usd: 25
+    max_concurrent_positions_per_market: 1
+    cooldown_sec: 60
+    complement:
+      enabled: true
+      min_edge_pct: 0.4        # locked-in return on cost, after fee buffer -- keep LOW for frequency
+      max_edge_pct: 5.0        # above this, assume a bad quote and skip
+      fee_buffer_pct: 0.2
+    spot_anchor:
+      enabled: true
+      min_edge_pct: 6.0        # model-vs-quote gap in probability points; deliberately LARGE
+      max_edge_pct: 30.0       # beyond this, assume the model (or quote) is broken
+      min_confidence: 0.75
+      max_days_to_expiry: 45   # vol assumptions degrade over long horizons
+      kelly_fraction: 0.15
+      annualized_vol:          # assumed vol per symbol for the pricing model
+        BTC/USD: 0.55
+        ETH/USD: 0.70
+        SOL/USD: 0.90
+      default_annualized_vol: 0.80

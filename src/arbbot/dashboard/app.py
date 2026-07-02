@@ -9,6 +9,7 @@ never talks to the bot's execution layer directly and cannot place trades.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -49,6 +50,10 @@ def status() -> dict:
         return {"running": False}
 
     is_stale = (time.time() - row["last_heartbeat"]) > HEARTBEAT_STALE_AFTER_SEC
+    try:
+        poll_intervals = json.loads(row["poll_intervals"]) if row["poll_intervals"] else {}
+    except (ValueError, TypeError):
+        poll_intervals = {}
     return {
         "running": not is_stale,
         "mode": row["mode"],
@@ -59,6 +64,7 @@ def status() -> dict:
         "halt_reason": row["halt_reason"],
         "open_exposure_usd": row["open_exposure_usd"],
         "bankroll_usd": row["bankroll_usd"],
+        "poll_intervals": poll_intervals,
     }
 
 
@@ -106,6 +112,9 @@ def summary() -> dict:
         bucket["locked_in_profit_usd"] = round(bucket["locked_in_profit_usd"], 2)
         bucket["win_rate"] = round(bucket["wins"] / bucket["settled"], 4) if bucket["settled"] else None
 
+    hour_ago = time.time() - 3600.0
+    trades_last_hour = sum(1 for r in rows if r["ts"] >= hour_ago)
+
     return {
         "total_trades": total_trades,
         "settled_trades": len(settled),
@@ -115,8 +124,29 @@ def summary() -> dict:
         "avg_edge_pct": round(avg_edge, 3),
         "p50_latency_ms": round(_percentile(50), 1),
         "p95_latency_ms": round(_percentile(95), 1),
+        "trades_last_hour": trades_last_hour,
         "by_signal_type": by_signal_type,
         "by_market_family": by_family,
+    }
+
+
+@app.get("/api/opportunities")
+def opportunities(limit: int = 100) -> dict:
+    """Recent detected opportunities (executed AND skipped, with reasons) plus
+    aggregate counts -- the dashboard's live 'what is the bot seeing' feed.
+    """
+    conn = trade_log.get_connection(_db_path())
+    rows = conn.execute("SELECT * FROM opportunities ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    counts = conn.execute("SELECT status, COUNT(*) AS n FROM opportunities GROUP BY status").fetchall()
+    hour_ago = time.time() - 3600.0
+    detected_last_hour = conn.execute(
+        "SELECT COUNT(*) AS n FROM opportunities WHERE ts >= ?", (hour_ago,)
+    ).fetchone()["n"]
+    conn.close()
+    return {
+        "items": [dict(r) for r in rows],
+        "counts": {r["status"]: r["n"] for r in counts},
+        "detected_last_hour": detected_last_hour,
     }
 
 

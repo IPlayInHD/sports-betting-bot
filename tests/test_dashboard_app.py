@@ -71,6 +71,50 @@ def test_summary_and_trades_endpoints(client):
     assert series == [{"ts": series[0]["ts"], "cumulative_pnl_usd": 0.38}]
 
 
+def test_opportunities_endpoint(client):
+    test_client, db_path = client
+    conn = trade_log.get_connection(db_path)
+    trade_log.record_opportunity(
+        conn,
+        family="polycrypto",
+        strategy="complement",
+        symbol="Will BTC be above $70k?",
+        detail="Will BTC be above $70k?",
+        edge_pct=1.1,
+        confidence=0.92,
+        status="executed",
+    )
+    trade_log.record_opportunity(
+        conn,
+        family="crypto",
+        strategy="cross_exchange",
+        symbol="BTC/USD",
+        detail="coinbase -> kraken",
+        edge_pct=0.4,
+        confidence=1.0,
+        status="skipped",
+        reason="cooldown active",
+    )
+
+    body = test_client.get("/api/opportunities").json()
+    assert body["counts"] == {"executed": 1, "skipped": 1}
+    assert body["detected_last_hour"] == 2
+    assert len(body["items"]) == 2
+    assert body["items"][0]["detail"] == "coinbase -> kraken"  # newest first
+
+
+def test_status_includes_poll_intervals(client):
+    test_client, db_path = client
+    conn = trade_log.get_connection(db_path)
+    trade_log.record_startup(conn, mode="paper", use_mock=True, bankroll_usd=50.0)
+    trade_log.record_heartbeat(
+        conn, trading_halted=False, halt_reason="", open_exposure_usd=0.0, poll_intervals={"crypto": 0.4}
+    )
+
+    body = test_client.get("/api/status").json()
+    assert body["poll_intervals"] == {"crypto": 0.4}
+
+
 def test_index_serves_html(client):
     test_client, _ = client
     resp = test_client.get("/")
