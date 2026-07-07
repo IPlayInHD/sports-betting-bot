@@ -693,8 +693,29 @@ async def _heartbeat_loop(
         await asyncio.sleep(interval_sec)
 
 
+def _apply_conservative_mode(cfg: AppConfig) -> None:
+    """Win-rate-first override: force every directional/statistical layer off
+    so only the riskless arbitrage layers can trade. Mutates cfg in place;
+    logged loudly so it's obvious in the startup output which layers are live.
+    """
+    if not cfg.conservative_mode:
+        return
+    disabled = []
+    if cfg.strategy.value_edge.enabled:
+        cfg.strategy.value_edge.enabled = False
+        disabled.append("sports value_edge")
+    if cfg.markets.polymarket_crypto.spot_anchor.enabled:
+        cfg.markets.polymarket_crypto.spot_anchor.enabled = False
+        disabled.append("polycrypto spot_anchor")
+    logger.warning(
+        "conservative_mode ON -- riskless arbitrage layers only%s",
+        f" (disabled: {', '.join(disabled)})" if disabled else "",
+    )
+
+
 async def run(cfg: AppConfig, secrets: Secrets) -> None:
     setup_logging(cfg.monitoring.log_level)
+    _apply_conservative_mode(cfg)
 
     odds_provider, poly_client, use_mock = _build_data_sources(cfg, secrets)
     alert_dispatcher = AlertDispatcher(webhook_url=secrets.alert_webhook_url)

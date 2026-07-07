@@ -62,6 +62,10 @@ def test_summary_and_trades_endpoints(client):
     assert summary["total_trades"] == 1
     assert summary["win_rate"] == 1.0
     assert summary["total_locked_in_profit_usd"] == pytest.approx(0.38)
+    assert summary["wins"] == 1
+    assert summary["losses"] == 0
+    assert summary["open_trades"] == 0
+    assert summary["avg_confidence"] == pytest.approx(0.8)
 
     trades = test_client.get("/api/trades").json()
     assert len(trades) == 1

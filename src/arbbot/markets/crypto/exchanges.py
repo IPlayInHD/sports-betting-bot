@@ -86,11 +86,15 @@ class KrakenPriceFeed(CryptoPriceFeed):
     BASE_URL = "https://api.kraken.com/0/public"
 
     # Kraken uses idiosyncratic pair codes rather than plain "BTC/USD".
+    # PAXG (PAX Gold) and XAUT (Tether Gold) are ERC-20 tokens each redeemable
+    # for one fine troy ounce of gold -- they track the spot gold price, so
+    # they're the low-volatility "stable trend" leg of the cross-exchange book.
     _SYMBOL_MAP = {
         "BTC/USD": "XBTUSD",
         "ETH/USD": "ETHUSD",
         "SOL/USD": "SOLUSD",
         "LTC/USD": "LTCUSD",
+        "PAXG/USD": "PAXGUSD",   # gold-backed token
     }
 
     def __init__(self, session: aiohttp.ClientSession | None = None) -> None:

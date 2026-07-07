@@ -138,9 +138,17 @@ class CryptoOrderManager:
 
         position = Position(signal_id=opportunity.opportunity_id, orders=list(results))
         if all(o.status == OrderStatus.FILLED for o in results):
-            # Gross profit at quoted prices (pre-fee, same convention as the
-            # sports arbitrage guaranteed_profit_usd calculation).
-            buy_cost = sum(o.filled_size_usd for o in results if o.side == "buy")
-            sell_proceeds = sum(o.filled_size_usd for o in results if o.side == "sell")
+            # Profit at ACTUAL filled prices, not quoted sizes, so paper
+            # slippage (buy fills a touch higher, sell a touch lower) flows
+            # into recorded P&L instead of flattering it -- the same
+            # convention the polycrypto complement layer uses. quantity is
+            # recovered from the order's quoted size/price.
+            def _leg_value(o: Order) -> float:
+                quantity = o.size_usd / o.price if o.price > 0 else 0.0
+                fill = o.filled_price if o.filled_price is not None else o.price
+                return quantity * fill
+
+            buy_cost = sum(_leg_value(o) for o in results if o.side == "buy")
+            sell_proceeds = sum(_leg_value(o) for o in results if o.side == "sell")
             position.guaranteed_profit_usd = sell_proceeds - buy_cost
         return position

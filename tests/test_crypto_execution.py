@@ -42,6 +42,19 @@ async def test_execute_opportunity_computes_guaranteed_profit():
     assert position.guaranteed_profit_usd == pytest.approx(10.0)
 
 
+async def test_slippage_reduces_recorded_profit():
+    # With adverse slippage the buy fills higher and the sell lower, so the
+    # honest recorded profit must come in BELOW the zero-slippage $10 -- paper
+    # P&L should not flatter itself by ignoring fills.
+    paper = PaperCryptoExecutionClient(slippage_bps=50.0)
+    manager = CryptoOrderManager(client_for_exchange={"coinbase": paper, "kraken": paper})
+
+    position = await manager.execute_opportunity(_opportunity(buy_price=100.0, sell_price=101.0), total_stake_usd=1000.0)
+
+    assert position.guaranteed_profit_usd is not None
+    assert position.guaranteed_profit_usd < 10.0
+
+
 async def test_execute_opportunity_no_profit_recorded_if_a_leg_is_rejected():
     class RejectingClient(PaperCryptoExecutionClient):
         async def submit(self, order):

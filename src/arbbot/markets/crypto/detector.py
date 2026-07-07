@@ -43,12 +43,20 @@ def detect_crypto_arbitrage(
         if edge_pct < min_edge_pct or gross_edge_pct > max_edge_pct:
             continue
 
+        # The trade is riskless once both legs fill, so confidence measures the
+        # MARGIN OF SAFETY rather than direction: how far the net edge clears
+        # the minimum threshold. A gap that only just clears fees (thin margin,
+        # more likely to evaporate before both legs fill) scores lower than one
+        # with room to spare. Feeds sizing and the dashboard's confidence view.
+        safety_margin = (edge_pct - min_edge_pct) / min_edge_pct if min_edge_pct > 0 else 1.0
+        confidence = round(min(1.0, 0.55 + 0.45 * min(1.0, max(0.0, safety_margin))), 4)
+
         opportunities.append(
             MarketOpportunity(
                 family=MarketFamily.CRYPTO,
                 symbol=symbol,
                 edge_pct=edge_pct,
-                confidence=1.0,
+                confidence=confidence,
                 legs=[
                     {"venue": cheapest.exchange, "action": "buy", "symbol": symbol, "price": cheapest.ask},
                     {"venue": priciest.exchange, "action": "sell", "symbol": symbol, "price": priciest.bid},

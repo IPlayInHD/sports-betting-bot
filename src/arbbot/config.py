@@ -89,7 +89,10 @@ class CryptoMarketConfig(BaseModel):
     min_edge_pct: float = 0.3
     max_edge_pct: float = 5.0
     fee_pct_per_leg: float = 0.1
-    max_stake_per_trade_pct: float = 2.0
+    # 4% (vs 2% elsewhere) so a $50 bankroll clears the ~$1 venue minimum after
+    # confidence scaling -- this riskless desk is a key frequency source, and
+    # the absolute-dollar cap keeps live sizes small regardless.
+    max_stake_per_trade_pct: float = 4.0
     max_stake_per_trade_usd: float = 50.0
     max_concurrent_positions_per_symbol: int = 1
     # Once an opportunity on a symbol executes, ignore re-detections of the
@@ -148,6 +151,15 @@ class MarketsConfig(BaseModel):
 
 class AppConfig(BaseModel):
     mode: Literal["paper", "backtest", "live"] = "paper"
+    # Win-rate-first switch. When true (the default), only the RISKLESS
+    # strategy layers run -- sports arbitrage, crypto cross-exchange, and the
+    # Polymarket YES+NO complement -- all of which win by construction once
+    # both legs fill. The directional model layers (value_edge, polycrypto
+    # spot_anchor) are forced off regardless of their own enabled flags, so a
+    # single toggle guarantees the bot only takes trades whose profit is
+    # locked in at execution. Set false to also run the higher-variance
+    # statistical layers.
+    conservative_mode: bool = True
     sports: list[str] = Field(default_factory=list)
     polling: PollingConfig = PollingConfig()
     matching: MatchingConfig = MatchingConfig()

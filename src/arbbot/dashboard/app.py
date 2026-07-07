@@ -76,11 +76,14 @@ def summary() -> dict:
 
     total_trades = len(rows)
     settled = [r for r in rows if r["locked_in_profit_usd"] is not None]
+    open_trades = total_trades - len(settled)
     total_locked_in_profit = sum(r["locked_in_profit_usd"] for r in settled)
     total_stake = sum(r["stake_usd"] for r in rows)
     wins = sum(1 for r in settled if r["locked_in_profit_usd"] > 0)
+    losses = len(settled) - wins
     win_rate = (wins / len(settled)) if settled else None
     avg_edge = (sum(r["edge_pct"] for r in rows) / total_trades) if total_trades else 0.0
+    avg_confidence = (sum(r["confidence"] for r in rows) / total_trades) if total_trades else 0.0
 
     latencies = sorted(r["latency_ms"] for r in rows if r["latency_ms"] is not None)
 
@@ -118,10 +121,14 @@ def summary() -> dict:
     return {
         "total_trades": total_trades,
         "settled_trades": len(settled),
+        "open_trades": open_trades,
+        "wins": wins,
+        "losses": losses,
         "total_stake_usd": round(total_stake, 2),
         "total_locked_in_profit_usd": round(total_locked_in_profit, 2),
         "win_rate": round(win_rate, 4) if win_rate is not None else None,
         "avg_edge_pct": round(avg_edge, 3),
+        "avg_confidence": round(avg_confidence, 4),
         "p50_latency_ms": round(_percentile(50), 1),
         "p95_latency_ms": round(_percentile(95), 1),
         "trades_last_hour": trades_last_hour,

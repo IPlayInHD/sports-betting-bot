@@ -159,6 +159,30 @@ this layer is a directional bet, its positions stay OPEN until the market
 resolves, and you can disable it with `spot_anchor.enabled: false` while
 keeping the riskless complement layer.
 
+## Win-rate-first mode (the default)
+
+The top-level `conservative_mode: true` flag makes the bot trade **only the
+riskless arbitrage layers** — sports arbitrage, crypto cross-exchange, and the
+Polymarket YES+NO complement — every one of which wins by construction once
+both legs fill. The directional/statistical layers (sports `value_edge`,
+polycrypto `spot_anchor`) are forced off regardless of their own `enabled`
+flags. This is the setting to leave on if your priority is a high win rate and
+high trade frequency rather than chasing larger, riskier edges. Set it to
+`false` to also run the higher-variance model layers.
+
+### Gold and other stable assets
+
+The crypto cross-exchange desk isn't limited to volatile coins. **PAXG (PAX
+Gold)** is included by default: it's a token redeemable for one troy ounce of
+gold, so it tracks the gold price (low volatility, stable trend) while still
+trading cross-exchange — a calmer, higher-win-rate book that runs through the
+exact same riskless buy-low/sell-high engine. Add more symbols in
+`config.yaml`'s `markets.crypto.symbols` (e.g. `XAUT/USD` for Tether Gold, or
+more majors); feeds that don't list a symbol simply return no quote for it.
+This is the honest way to "add gold" on a small account — via a gold-tracking
+token that fits the existing arbitrage model, not gold futures (which need a
+funded futures account and don't offer retail-capturable arbitrage).
+
 ## Running on a small bankroll ($50-100)
 
 Defaults are tuned for this (`risk.bankroll_usd: 50`):

@@ -61,6 +61,24 @@ def test_skips_when_cheapest_and_priciest_are_same_exchange():
     assert opportunities == []
 
 
+def test_confidence_scales_with_safety_margin():
+    # A gap that only just clears the minimum edge scores lower confidence
+    # than one with a comfortable margin above it.
+    thin = [
+        _quote("coinbase", "BTC/USD", bid=64950, ask=65000),
+        _quote("kraken", "BTC/USD", bid=65100, ask=65150),
+    ]
+    thick = [
+        _quote("coinbase", "BTC/USD", bid=64950, ask=65000),
+        _quote("kraken", "BTC/USD", bid=65600, ask=65650),
+    ]
+    thin_opp = detect_crypto_arbitrage(thin, min_edge_pct=0.1, fee_pct_per_leg=0.02)[0]
+    thick_opp = detect_crypto_arbitrage(thick, min_edge_pct=0.1, fee_pct_per_leg=0.02)[0]
+    assert 0.0 <= thin_opp.confidence <= 1.0
+    assert thick_opp.confidence > thin_opp.confidence
+    assert thick_opp.confidence == pytest.approx(1.0)  # wide margin saturates
+
+
 def test_gross_edge_above_max_is_treated_as_bad_data():
     quotes = [
         _quote("coinbase", "BTC/USD", bid=64990, ask=1000),  # implausible ask -- bad data, not a real gap

@@ -4,6 +4,14 @@
 
 mode: paper  # paper | backtest | live
 
+# Win-rate-first switch. true = ONLY the riskless arbitrage layers run
+# (sports arb, crypto cross-exchange, Polymarket YES+NO complement) -- every
+# one wins by construction once both legs fill. The directional model layers
+# (sports value_edge, polycrypto spot_anchor) are forced off no matter what
+# their own enabled flags say. Set false to also run those higher-variance
+# statistical layers (higher potential edge, real chance of a losing trade).
+conservative_mode: true
+
 polling:
   odds_poll_interval_sec: 2.0
   polymarket_poll_interval_sec: 1.0
@@ -64,12 +72,17 @@ markets:
   crypto:
     enabled: true
     exchanges: [coinbase, kraken, binanceus]   # use "binance" instead of "binanceus" outside the US
-    symbols: [BTC/USD, ETH/USD, SOL/USD]
+    # PAXG/USD is PAX Gold -- a token redeemable for 1 oz of gold. It tracks
+    # the gold price (low volatility, stable trend) and trades cross-exchange,
+    # so it slots straight into the riskless buy-low/sell-high engine as a
+    # calmer, higher-win-rate book alongside the crypto majors. (Not all
+    # exchanges list every symbol; feeds that don't just return no quote.)
+    symbols: [BTC/USD, ETH/USD, SOL/USD, PAXG/USD]
     poll_interval_sec: 2.0
     min_edge_pct: 0.3          # keep gaps LOW here too -> frequency over size
     max_edge_pct: 5.0          # above this, treat as a bad quote and skip
     fee_pct_per_leg: 0.1       # typical taker fee; raise this to match your actual exchange tier
-    max_stake_per_trade_pct: 2.0
+    max_stake_per_trade_pct: 4.0   # higher than 2% so a $50 bankroll clears the ~$1 venue minimum
     max_stake_per_trade_usd: 50
     max_concurrent_positions_per_symbol: 1
     cooldown_sec: 20           # ignore re-detections of a just-traded symbol for this long
