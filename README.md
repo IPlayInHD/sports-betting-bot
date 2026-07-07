@@ -204,10 +204,15 @@ pip install -e ".[dev]"        # add "[live]" for live Polymarket, "[live-crypto
 cp .env.example .env           # fill in only what you need (see below)
 ```
 
-- `ODDS_API_KEY` (from https://the-odds-api.com) — optional. Without it, the
-  bot uses a built-in synthetic odds generator (`ARBBOT_USE_MOCK_DATA=true`
-  is implied automatically when the key is absent, and also switches crypto
-  to its synthetic feed).
+- `ODDS_API_KEY` (from https://the-odds-api.com) — optional, sports desk only.
+  The crypto and Polymarket desks always run on **real** public data with no
+  key. Without an odds key the **sports desk is simply disabled** (it needs a
+  paid odds feed, and the bot will not fabricate sports data for it) while the
+  crypto and Polymarket desks keep running live.
+- Synthetic data is used **only** when you explicitly set
+  `ARBBOT_USE_MOCK_DATA=true` — an offline demo mode that fabricates gaps for
+  every desk. Leave it unset for genuine observation: real quotes, real gaps,
+  real (paper) fills.
 - Polymarket and crypto exchange market data (public tickers) need **no key**.
 - Everything else in `.env.example` is only required for live trading.
 

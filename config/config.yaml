@@ -50,7 +50,7 @@ filters:
   max_concurrent_positions_per_market_group: 1  # correlation guard
 
 risk:
-  bankroll_usd: 50
+  bankroll_usd: 100            # observation-mode starting capital (paper $ only until you go live)
   max_stake_per_trade_pct: 2.0
   max_stake_per_trade_usd: 50
   min_stake_usd: 1.0            # skip trades sized below venue minimums (Polymarket ~ $1)

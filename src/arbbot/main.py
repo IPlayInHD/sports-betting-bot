@@ -356,6 +356,9 @@ async def _run_polycrypto_cycle(
 ) -> int:
     pc_cfg = cfg.markets.polymarket_crypto
 
+    # return_exceptions=True on both branches so a transient network/HTTP
+    # error from the public APIs becomes a concise one-line warning below,
+    # not a full traceback dumped on every polling cycle.
     quotes_task = poly_feed.fetch_crypto_markets()
     if pc_cfg.spot_anchor.enabled and spot_feeds:
         spot_results = await asyncio.gather(
@@ -365,11 +368,11 @@ async def _run_polycrypto_cycle(
         )
         quotes_result, spot_quote_results = spot_results[0], spot_results[1:]
     else:
-        quotes_result = await quotes_task
+        quotes_result = (await asyncio.gather(quotes_task, return_exceptions=True))[0]
         spot_quote_results = []
 
     if isinstance(quotes_result, Exception):
-        logger.error("failed to fetch polymarket crypto markets: %s", quotes_result)
+        logger.warning("failed to fetch polymarket crypto markets (will retry next cycle): %s", quotes_result)
         return 0
     poly_quotes = quotes_result
     if not poly_quotes:
@@ -515,12 +518,34 @@ async def _run_polycrypto_cycle(
     return len(opportunities)
 
 
-def _build_data_sources(cfg: AppConfig, secrets: Secrets) -> tuple[OddsProvider, PolymarketDataClient, bool]:
-    use_mock = os.getenv("ARBBOT_USE_MOCK_DATA", "").lower() == "true" or not secrets.odds_api_key
-    if use_mock:
-        logger.warning("ODDS_API_KEY not set (or ARBBOT_USE_MOCK_DATA=true) -- using synthetic odds/market data")
-        return MockOddsProvider(), MockPolymarketClient(), True
-    return TheOddsApiProvider(api_key=secrets.odds_api_key), ClobMarketDataClient(), False
+def _build_data_sources(
+    cfg: AppConfig, secrets: Secrets
+) -> tuple[OddsProvider, PolymarketDataClient, bool, bool]:
+    """Returns (odds_provider, polymarket_client, use_mock, sports_enabled).
+
+    Synthetic data is used ONLY when explicitly requested with
+    ARBBOT_USE_MOCK_DATA=true. Otherwise everything runs on REAL data:
+    Polymarket (Gamma + CLOB) and the crypto exchanges expose public,
+    key-free price feeds, so the crypto and polycrypto desks always run live.
+    The sports desk is the sole exception -- it needs a paid odds feed, so
+    without ODDS_API_KEY it is DISABLED rather than fed fabricated data (a
+    missing key must never silently turn real observation into a simulation).
+    """
+    if os.getenv("ARBBOT_USE_MOCK_DATA", "").lower() == "true":
+        logger.warning("ARBBOT_USE_MOCK_DATA=true -- ALL desks run on synthetic data (demo/offline only)")
+        return MockOddsProvider(), MockPolymarketClient(), True, True
+
+    poly_client = ClobMarketDataClient()
+    if secrets.odds_api_key:
+        return TheOddsApiProvider(api_key=secrets.odds_api_key), poly_client, False, True
+
+    logger.warning(
+        "No ODDS_API_KEY set -- running REAL market data for the crypto and "
+        "Polymarket desks; the SPORTS desk is DISABLED (it needs a paid odds "
+        "feed and this build will not fabricate sports data). Set ODDS_API_KEY "
+        "to enable it."
+    )
+    return MockOddsProvider(), poly_client, False, False
 
 
 def _build_execution_clients(
@@ -717,7 +742,9 @@ async def run(cfg: AppConfig, secrets: Secrets) -> None:
     setup_logging(cfg.monitoring.log_level)
     _apply_conservative_mode(cfg)
 
-    odds_provider, poly_client, use_mock = _build_data_sources(cfg, secrets)
+    odds_provider, poly_client, use_mock, sports_enabled = _build_data_sources(cfg, secrets)
+    if not cfg.sports:
+        sports_enabled = False
     alert_dispatcher = AlertDispatcher(webhook_url=secrets.alert_webhook_url)
     db_conn = trade_log.get_connection()
     trade_log.record_startup(db_conn, mode=cfg.mode, use_mock=use_mock, bankroll_usd=cfg.risk.bankroll_usd)
@@ -757,23 +784,29 @@ async def run(cfg: AppConfig, secrets: Secrets) -> None:
         )
 
     pollers: dict[str, AdaptivePoller] = {}
-    pollers["sports"] = _make_poller(min(cfg.polling.odds_poll_interval_sec, cfg.polling.polymarket_poll_interval_sec))
-    tasks = [
-        asyncio.create_task(
-            _sports_loop(
-                cfg,
-                odds_provider,
-                poly_client,
-                exposure_tracker,
-                risk_manager,
-                order_manager,
-                metrics,
-                filter_cfg,
-                pollers["sports"],
-                db_conn,
+    tasks: list[asyncio.Task] = []
+    if sports_enabled:
+        pollers["sports"] = _make_poller(
+            min(cfg.polling.odds_poll_interval_sec, cfg.polling.polymarket_poll_interval_sec)
+        )
+        tasks.append(
+            asyncio.create_task(
+                _sports_loop(
+                    cfg,
+                    odds_provider,
+                    poly_client,
+                    exposure_tracker,
+                    risk_manager,
+                    order_manager,
+                    metrics,
+                    filter_cfg,
+                    pollers["sports"],
+                    db_conn,
+                )
             )
-        ),
-    ]
+        )
+    else:
+        logger.info("sports desk not running (no odds feed) -- crypto + Polymarket desks only")
 
     crypto_feeds: list[CryptoPriceFeed] = []
     needs_spot_feeds = cfg.markets.crypto.enabled or (
