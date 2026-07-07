@@ -248,6 +248,25 @@ async def _run_crypto_cycle(
         fee_pct_per_leg=crypto_cfg.fee_pct_per_leg,
     )
 
+    if crypto_cfg.observation_only:
+        # Detect and log for learning, but never trade -- cross-exchange arb is
+        # a latency race and needs pre-funded balances on multiple exchanges,
+        # so paper-filling it would overstate a profit that isn't capturable
+        # at this capital. The blotter shows these with this reason.
+        for opp in opportunities:
+            trade_log.record_opportunity(
+                db_conn,
+                family="crypto",
+                strategy="cross_exchange",
+                symbol=opp.symbol,
+                detail=f"{opp.metadata.get('buy_exchange')} -> {opp.metadata.get('sell_exchange')}",
+                edge_pct=opp.edge_pct,
+                confidence=opp.confidence,
+                status="skipped",
+                reason="observation only -- latency race + needs pre-funded balances on multiple exchanges",
+            )
+        return len(opportunities)
+
     for opp in opportunities:
         def _skip(reason: str, opp=opp) -> None:
             logger.info("opportunity %s skipped: %s", opp.opportunity_id, reason)
@@ -836,7 +855,11 @@ async def run(cfg: AppConfig, secrets: Secrets) -> None:
         poly_crypto_feed = (
             MockPolymarketCryptoFeed()
             if use_mock
-            else PolymarketCryptoDataClient(market_limit=cfg.markets.polymarket_crypto.market_limit)
+            else PolymarketCryptoDataClient(
+                market_limit=cfg.markets.polymarket_crypto.market_limit,
+                scan_all_markets=cfg.markets.polymarket_crypto.scan_all_markets,
+                tags=cfg.markets.polymarket_crypto.tags,
+            )
         )
         # Both polycrypto strategies execute only Polymarket legs, so they
         # share the sports pipeline's Polymarket execution client (paper in

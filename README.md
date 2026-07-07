@@ -170,18 +170,28 @@ flags. This is the setting to leave on if your priority is a high win rate and
 high trade frequency rather than chasing larger, riskier edges. Set it to
 `false` to also run the higher-variance model layers.
 
-### Gold and other stable assets
+### Crypto cross-exchange desk is observation-only by default
 
-The crypto cross-exchange desk isn't limited to volatile coins. **PAXG (PAX
-Gold)** is included by default: it's a token redeemable for one troy ounce of
-gold, so it tracks the gold price (low volatility, stable trend) while still
-trading cross-exchange — a calmer, higher-win-rate book that runs through the
-exact same riskless buy-low/sell-high engine. Add more symbols in
-`config.yaml`'s `markets.crypto.symbols` (e.g. `XAUT/USD` for Tether Gold, or
-more majors); feeds that don't list a symbol simply return no quote for it.
-This is the honest way to "add gold" on a small account — via a gold-tracking
-token that fits the existing arbitrage model, not gold futures (which need a
-funded futures account and don't offer retail-capturable arbitrage).
+Cross-exchange arbitrage on the crypto majors is a **latency race** that
+institutions win (co-located servers, sub-millisecond execution), and it also
+needs pre-funded balances on multiple exchanges — neither of which a small
+retail account can do. So this desk defaults to `observation_only: true`: it
+**detects and logs** gaps (useful to watch and learn from, shown in the
+dashboard blotter with that reason) but does **not** trade them, because
+paper-filling them would overstate a profit you couldn't actually capture
+live. Set `markets.crypto.observation_only: false` to let it paper-trade.
+Included symbols cover the majors plus **PAXG (PAX Gold)**, a gold-tracking
+token, so you can watch a stable-asset book alongside the volatile ones.
+
+### Where the bot actually competes: capacity-constrained prediction markets
+
+The one place a small account has a structural footing is markets too thin for
+institutions to bother with. That's why the **Polymarket complement arbitrage**
+(YES + NO < $1) is the primary desk, and why `scan_all_markets: true` scans
+*every* active binary Polymarket market — politics, sports, culture, crypto —
+not just crypto. The riskless complement identity is asset-agnostic, so casting
+the widest net gives the most shots at the rare riskless gap inside the niche
+where being small is an advantage rather than a handicap.
 
 ## Running on a small bankroll ($50-100)
 

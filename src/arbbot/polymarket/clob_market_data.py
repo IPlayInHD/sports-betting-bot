@@ -110,7 +110,8 @@ class ClobMarketDataClient(PolymarketDataClient):
             )
         return quotes
 
-    async def fetch_markets_by_tag(self, tag: str, limit: int = 200) -> list[PolymarketQuote]:
+    async def fetch_markets_by_tag(self, tag: str | None, limit: int = 200) -> list[PolymarketQuote]:
+        """tag=None fetches all active markets; a tag string filters to it."""
         markets = await self._gamma.fetch_active_markets(tag=tag, limit=limit)
         return await self.fetch_quotes_for_markets(markets)
 

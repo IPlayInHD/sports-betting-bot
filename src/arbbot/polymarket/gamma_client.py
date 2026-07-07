@@ -32,18 +32,20 @@ class GammaClient:
         return self._session
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, max=4))
-    async def fetch_active_markets(self, tag: str = "sports", limit: int = 200) -> list[dict]:
-        """Return raw Gamma market dicts for currently active, non-closed markets
-        with the given tag (e.g. "sports", "crypto"). Caller is responsible
-        for any matching/parsing against other venues.
+    async def fetch_active_markets(self, tag: str | None = "sports", limit: int = 200) -> list[dict]:
+        """Return raw Gamma market dicts for currently active, non-closed markets.
+        With a tag (e.g. "sports", "crypto") it filters to that category; with
+        tag=None it returns all active markets. Caller is responsible for any
+        matching/parsing against other venues.
         """
         session = await self._get_session()
         params = {
             "active": "true",
             "closed": "false",
-            "tag": tag,
             "limit": str(limit),
         }
+        if tag is not None:
+            params["tag"] = tag
         async with session.get(f"{BASE_URL}/markets", params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             resp.raise_for_status()
             data = await resp.json()

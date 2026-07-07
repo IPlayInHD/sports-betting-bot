@@ -55,7 +55,7 @@ class FiltersConfig(BaseModel):
 
 
 class RiskConfig(BaseModel):
-    bankroll_usd: float = 1000
+    bankroll_usd: float = 100
     max_stake_per_trade_pct: float = 2.0
     max_stake_per_trade_usd: float = 50
     max_total_exposure_pct: float = 25
@@ -85,6 +85,13 @@ class CryptoMarketConfig(BaseModel):
     # binance.com, which blocks US IPs); switch to "binance" if that's not you.
     exchanges: list[str] = Field(default_factory=lambda: ["coinbase", "kraken", "binanceus"])
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USD", "ETH/USD", "SOL/USD"])
+    # Observation-only by default: cross-exchange arbitrage on the crypto
+    # majors is a latency race (institutions win it) AND needs pre-funded
+    # balances on multiple exchanges, which a small account can't do. So this
+    # desk DETECTS and logs gaps -- useful to watch and learn from -- but does
+    # not place trades, since paper-filling them would overstate a profit you
+    # couldn't actually capture live. Set false to let it paper-trade.
+    observation_only: bool = True
     poll_interval_sec: float = 2.0
     min_edge_pct: float = 0.3
     max_edge_pct: float = 5.0
@@ -128,7 +135,15 @@ class PolymarketCryptoConfig(BaseModel):
 
     enabled: bool = True
     poll_interval_sec: float = 1.5
-    market_limit: int = 150
+    market_limit: int = 200
+    # The riskless YES+NO complement arbitrage works on ANY binary Polymarket
+    # market, not just crypto -- politics, sports, culture, etc. Scanning all
+    # active markets means many more shots at the rare riskless gap, which is
+    # the honest way to raise frequency inside a capacity-constrained niche
+    # (markets too thin for institutions to bother with). Set scan_all_markets
+    # false to restrict to the `tags` list instead.
+    scan_all_markets: bool = True
+    tags: list[str] = Field(default_factory=lambda: ["crypto"])
     min_liquidity_usd: float = 250.0
     # Absolute cents, not % of mid: cheap outcome tokens have huge relative
     # spreads that are still tradeable in absolute terms.

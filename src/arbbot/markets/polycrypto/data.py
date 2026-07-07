@@ -27,14 +27,33 @@ class PolymarketCryptoFeed(ABC):
 
 
 class PolymarketCryptoDataClient(PolymarketCryptoFeed):
-    name = "clob_crypto"
+    name = "clob_polymarket"
 
-    def __init__(self, clob: ClobMarketDataClient | None = None, market_limit: int = 150) -> None:
+    def __init__(
+        self,
+        clob: ClobMarketDataClient | None = None,
+        market_limit: int = 200,
+        scan_all_markets: bool = True,
+        tags: list[str] | None = None,
+    ) -> None:
         self._clob = clob or ClobMarketDataClient()
         self._market_limit = market_limit
+        self._scan_all = scan_all_markets
+        self._tags = tags or ["crypto"]
 
     async def fetch_crypto_markets(self) -> list[PolymarketQuote]:
-        return await self._clob.fetch_markets_by_tag("crypto", limit=self._market_limit)
+        if self._scan_all:
+            # All active markets -- the riskless complement arb is asset-agnostic.
+            return await self._clob.fetch_markets_by_tag(None, limit=self._market_limit)
+        # Restricted to specific tags: fetch each, dedupe by token.
+        seen: set[str] = set()
+        merged: list[PolymarketQuote] = []
+        for tag in self._tags:
+            for q in await self._clob.fetch_markets_by_tag(tag, limit=self._market_limit):
+                if q.token_id not in seen:
+                    seen.add(q.token_id)
+                    merged.append(q)
+        return merged
 
     async def close(self) -> None:
         await self._clob.close()

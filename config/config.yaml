@@ -71,6 +71,9 @@ monitoring:
 markets:
   crypto:
     enabled: true
+    observation_only: true     # DETECT + log cross-exchange gaps but don't trade them
+                               # (latency race + needs pre-funded multi-exchange balances).
+                               # Set false to paper-trade this desk.
     exchanges: [coinbase, kraken, binanceus]   # use "binance" instead of "binanceus" outside the US
     # PAXG/USD is PAX Gold -- a token redeemable for 1 oz of gold. It tracks
     # the gold price (low volatility, stable trend) and trades cross-exchange,
@@ -94,7 +97,12 @@ markets:
   polymarket_crypto:
     enabled: true
     poll_interval_sec: 1.5
-    market_limit: 150          # how many active crypto markets to scan per cycle
+    market_limit: 200          # how many active markets to scan per cycle
+    # The riskless YES+NO complement arb works on ANY binary market, so scan
+    # them all (politics, sports, culture, crypto...) rather than crypto only
+    # -- more shots at the rare riskless gap in this capacity-constrained niche.
+    scan_all_markets: true
+    tags: [crypto]             # only used when scan_all_markets is false
     min_liquidity_usd: 250
     max_spread_cents: 3.0      # absolute YES/NO book spread cap, in cents
     max_stake_per_trade_pct: 4.0   # higher than elsewhere so a $50 bankroll clears the ~$1 order minimum
